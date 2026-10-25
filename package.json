@@ -1,6 +1,8 @@
 {
   "name": "ctx",
   "version": "0.1.0",
+  "description": "Shared memory for your AI coding agents (Claude Code and Codex)",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "bin": {
