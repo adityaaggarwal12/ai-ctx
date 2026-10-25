@@ -1,6 +1,7 @@
 # Plan: a small local UI for ctx
 
-Status: proposal, not built.
+Status: built (`ctx ui`). Answers to the open questions: writes are included, the port is
+7770, and the page stays off until you first run `ctx ui`.
 
 ## Why
 
@@ -174,11 +175,3 @@ Clicking a fact shows its source turn, quote and history (superseded by, merged 
 6. **Docs.** Add a README section and a screenshot.
 
 Effort: about a day. No new dependencies.
-
-## Questions for you
-
-1. **Writes in version one?** The plan includes Done, Retract, Keep, Merge and Add note. A
-   read-only first version would be smaller and carry no write risk, but cleaning memory
-   is the main reason to build this.
-2. **Port.** Is 7770 fine?
-3. **On by default?** The plan keeps it off until you first run `ctx ui`.

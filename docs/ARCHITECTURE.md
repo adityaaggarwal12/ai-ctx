@@ -260,7 +260,24 @@ Every searched prompt logs its scores (never the prompt itself) to `logs/recall.
 `ctx recall-stats` shows where scores fall around `recall.minSim`, which helps tune it as
 memory grows.
 
-## 5. Timing and limits
+## 5. The review page
+
+`ctx ui` turns on a second listener in `ctxd`, bound to `127.0.0.1:7770`, that serves a
+plain HTML page (`src/ui/`) and a small JSON API (`src/ui-server.ts`). The page and the CLI
+call the same functions in `src/views.ts`, so they always show the same data. Buttons emit
+normal memory events.
+
+A localhost port can be reached from any website open in your browser, so every request is
+checked:
+
+- the `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`, which blocks DNS
+  rebinding
+- API calls need a cookie holding a random token from `~/.ctx/runtime/ui-token`, set when
+  `ctx ui` opens the page
+- writes need an `Origin` header matching the page itself
+- a strict Content Security Policy allows only the page's own script and styles
+
+## 6. Timing and limits
 
 | What | Limit |
 |---|---|
@@ -276,7 +293,7 @@ Measured on the author's Mac: a hook answers in 80 to 300 ms through the daemon,
 50 ms when reading SQLite directly. A memory call on a 5-turn batch takes about 20 seconds
 and costs about $0.004 at list price.
 
-## 6. Housekeeping
+## 7. Housekeeping
 
 | Job | How often |
 |---|---|
@@ -287,7 +304,7 @@ and costs about $0.004 at list price.
 | Refresh `LIVE.md` files | every 5 min |
 | Compact the archive (drop older copies of a turn) | once a day |
 
-## 7. Measuring memory quality
+## 8. Measuring memory quality
 
 `bun run eval` runs 15 hand-labelled conversations (in `eval/cases.json`) through the real
 extraction prompt. It reports:
@@ -303,7 +320,7 @@ Current baseline: every expected fact is found, but the model adds about 6 extra
 across 15 cases. It tends to restate one event as two facts, and to log routine work as
 progress. Tighten the prompt, then rerun the eval to confirm.
 
-## 8. Lessons from building it
+## 9. Lessons from building it
 
 These came from testing against real history (about 9,000 turns from 170 sessions):
 
@@ -321,7 +338,7 @@ These came from testing against real history (about 9,000 turns from 170 session
 - **A catch-all folder needs different treatment.** One scratch folder had collected 136
   facts about unrelated tasks, so mixed folders now get a brief without topic facts.
 
-## 9. Not built yet
+## 10. Not built yet
 
 - **Syncing between machines.** The plan: each machine writes only its own `archive/` and
   `events/` folders and syncs them with Syncthing or git. The daemon would need to pick up

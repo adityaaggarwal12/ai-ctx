@@ -105,6 +105,25 @@ downloads a small search model (about 300 MB) the first time it starts.
 | Fix memory | `ctx retract <id>`, `ctx done <id>`, `ctx keep <id>` |
 | Clean up | `ctx review` (old items), `ctx dedupe` (duplicates) |
 | Check health and cost | `ctx status`, `ctx doctor` |
+| See and clean everything in a browser | `ctx ui` |
+
+## Review page
+
+Run `ctx ui` to open a local page in your browser. It has four tabs:
+
+- **Projects**: every project with the exact brief a new chat receives, and its size in tokens
+- **Facts**: what needs review (old todos and gotchas, unconfirmed guesses) and duplicate
+  pairs, with Done, Retract, Keep and Merge buttons, plus a box to add a note
+- **Sessions**: live and recent chats across Orca, Conductor and the terminal, with their
+  latest turns
+- **Health**: daemon status, hooks, today's cost, backfill progress, and how often notes
+  get added to prompts
+
+The page is served by `ctxd` on `127.0.0.1:7770` only, so other machines can't reach it.
+`ctx ui` opens it with a secret link that becomes a cookie. Requests from other websites
+or other host names are refused. Every button records a normal memory change, the same as
+the matching `ctx` command. The page is off until you first run `ctx ui`, and `ctx ui --off`
+turns it off again.
 
 Hooks only reach chats started after the install. In a chat that was already open, ask the
 agent to run `ctx brief`.
@@ -150,6 +169,7 @@ Settings live in `~/.ctx/config.json`. All are optional.
 | `brief.staleDays` | `30` | Todos and gotchas not confirmed for this long leave the brief. `ctx review` lists them. |
 | `recall.minSim` | `0.53` | How close a note must be to your prompt before it is added. `ctx recall-stats` helps tune it. |
 | `recall.maxSnippets` | `3` | Most notes added to one prompt |
+| `ui.port` | `7770` | Port for the review page (always bound to 127.0.0.1) |
 | `embed.enabled` | `true` | Local vector search. Set `false` to use keyword search only. |
 | `branchScopedRepos` | `[]` | Repos where each branch is its own project, such as a playground repo with one idea per branch |
 | `mixedProjects` | `[]` | Catch-all folders with unrelated work. Their brief shows only sessions and preferences; topic notes arrive per prompt. |
