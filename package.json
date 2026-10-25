@@ -9,7 +9,8 @@
   "scripts": {
     "ctx": "bun src/cli.ts",
     "test": "bun test",
-    "build": "bun build src/cli.ts --compile --outfile dist/ctx"
+    "build": "bun build src/cli.ts --compile --outfile dist/ctx",
+    "eval": "bun eval/run.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.7.0"
@@ -18,5 +19,9 @@
     "@types/bun": "latest",
     "typescript": "^7.0.2"
   },
-  "trustedDependencies": ["onnxruntime-node", "protobufjs", "sharp"]
+  "trustedDependencies": [
+    "onnxruntime-node",
+    "protobufjs",
+    "sharp"
+  ]
 }

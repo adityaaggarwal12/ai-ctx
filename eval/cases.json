@@ -1,0 +1,118 @@
+[
+  {
+    "name": "decision with reason",
+    "turns": [
+      { "user": "For storage let's go with SQLite, not Postgres. It's a single-user tool and I don't want to run a server.", "agent": "Agreed. I'll use bun:sqlite with WAL mode and put the file in ~/.app/data.sqlite." }
+    ],
+    "expect": [{ "type": "decision", "all": ["sqlite"] }]
+  },
+  {
+    "name": "rejected proposal",
+    "turns": [
+      { "user": "The dashboard feels slow on first load.", "agent": "One option is to add a Redis cache in front of the stats queries so repeat loads are instant. Want me to set that up?" },
+      { "user": "No, skip Redis, that's overkill for v1. Just add an index on events.created_at.", "agent": "Done: added an index on events(created_at). First load went from 2.1s to 180ms." }
+    ],
+    "expect": [{ "type": "rejected", "all": ["redis"] }]
+  },
+  {
+    "name": "rejected by revert",
+    "turns": [
+      { "user": "The new response caching layer broke checkout in prod. Revert it, and we're not doing caching again until we have real latency metrics.", "agent": "Reverted commit 4f2a1c9 (response cache middleware) and redeployed. Checkout works again." }
+    ],
+    "expect": [{ "type": "rejected", "all": ["cach"] }]
+  },
+  {
+    "name": "preference from a correction",
+    "turns": [
+      { "user": "Add a loading spinner to the upload button.", "agent": "Added a spinner to UploadButton.tsx.\n\n## Summary\nI added a spinner component, wired the pending state, updated styles, and considered accessibility. Overall the change improves perceived performance by giving feedback during uploads..." },
+      { "user": "Stop writing long summaries at the end of every answer. Just list the files you changed.", "agent": "Understood. Files changed: src/components/UploadButton.tsx" }
+    ],
+    "expect": [{ "type": "preference", "all": ["summar|files"] }]
+  },
+  {
+    "name": "gotcha that cost time",
+    "turns": [
+      { "user": "Why do the tests hang forever?", "agent": "Found it after a lot of digging: vitest 3 hangs on Node 26 because its worker pool never exits. Pinning Node 24 in .nvmrc fixes it; the suite now finishes in 14s." },
+      { "user": "Ugh, that cost an hour. Keep Node 24 pinned.", "agent": "Pinned Node 24 in .nvmrc and added an engines field to package.json." }
+    ],
+    "expect": [{ "type": "gotcha|decision", "all": ["node", "24|26"] }]
+  },
+  {
+    "name": "deferred todo",
+    "turns": [
+      { "user": "Ship the signup form as is. Later we need rate limiting on the /signup endpoint, but not now.", "agent": "Shipped the signup form. I haven't touched rate limiting." }
+    ],
+    "expect": [{ "type": "todo", "all": ["rate", "signup"] }]
+  },
+  {
+    "name": "todo completed",
+    "memory": [{ "id": "ftodo01", "type": "todo", "text": "Add rate limiting to the /signup endpoint." }],
+    "turns": [
+      { "user": "Let's do the signup rate limiting now.", "agent": "Done: /signup now uses express-rate-limit at 5 requests per minute per IP, with a 429 JSON error. Tests pass." }
+    ],
+    "expect": [{ "op": "done", "target": "ftodo01" }]
+  },
+  {
+    "name": "decision replaced",
+    "memory": [{ "id": "fdep001", "type": "decision", "text": "The app is deployed on Vercel.", "why": "zero-config previews" }],
+    "turns": [
+      { "user": "We're moving off Vercel to Cloudflare Workers, the bandwidth bill is too high.", "agent": "Okay. I added wrangler.toml and switched the build to the Workers adapter; preview deploys now go to *.workers.dev." }
+    ],
+    "expect": [{ "op": "supersede", "target": "fdep001", "type": "decision", "all": ["cloudflare|workers"] }]
+  },
+  {
+    "name": "milestone reached",
+    "turns": [
+      { "user": "Is everything live?", "agent": "Yes: v1.0 is deployed to production, Stripe payments are live, and the first real order came through at 14:02." },
+      { "user": "Great, that's the launch done.", "agent": "Congrats on the launch." }
+    ],
+    "expect": [{ "type": "progress", "all": ["v1|launch|production"] }]
+  },
+  {
+    "name": "routine rename",
+    "turns": [
+      { "user": "Rename the variable foo to userCount in stats.ts.", "agent": "Renamed foo to userCount in src/stats.ts (4 occurrences)." }
+    ],
+    "expect": []
+  },
+  {
+    "name": "routine typo fix",
+    "turns": [
+      { "user": "fix the typo in the header, it says 'Dashbaord'", "agent": "Fixed: Header.tsx now says 'Dashboard'." },
+      { "user": "thanks", "agent": "You're welcome." }
+    ],
+    "expect": []
+  },
+  {
+    "name": "unconfirmed agent speculation",
+    "turns": [
+      { "user": "The users endpoint returns 500 when the email has a plus sign.", "agent": "Fixed the URL decoding in getUser. Longer term we might want to migrate the whole API to GraphQL so this class of bug goes away." },
+      { "user": "ok now fix the failing date test", "agent": "Fixed: the test assumed UTC; it now sets TZ explicitly." }
+    ],
+    "expect": []
+  },
+  {
+    "name": "general question",
+    "turns": [
+      { "user": "How does the cleanup function in useEffect work?", "agent": "React calls the cleanup before the effect re-runs and when the component unmounts, so you can remove listeners or cancel timers there." }
+    ],
+    "expect": []
+  },
+  {
+    "name": "already known",
+    "memory": [{ "id": "fpnpm01", "type": "decision", "text": "The repo uses pnpm, not npm or yarn.", "why": "workspace support" }],
+    "turns": [
+      { "user": "Add zod as a dependency.", "agent": "Ran pnpm add zod; lockfile updated." }
+    ],
+    "expect": []
+  },
+  {
+    "name": "secret is never stored",
+    "turns": [
+      { "user": "Here's the Stripe test key, put it in .env: sk_test_51Habcdefghijklmnopqrstuv", "agent": "Added STRIPE_SECRET_KEY to .env (gitignored) and read it via process.env in payments.ts." }
+    ],
+    "expect": [],
+    "allowExtra": true,
+    "forbid": ["sk_test_"]
+  }
+]

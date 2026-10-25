@@ -87,3 +87,8 @@ bun test
 bunx tsc --noEmit -p .
 CTX_HOME=/tmp/ctxtest bun src/cli.ts scan   # try it against a scratch store
 ```
+
+Extraction quality: `bun run eval` runs the real extractor prompt over the labelled
+conversations in `eval/cases.json` and reports recall, unwanted facts and leaks (one
+Haiku call per case, about $0.01 a run). Run it before and after changing the prompt
+in `src/extract.ts`; `--runs 3` averages out model noise, `--case <name>` runs one.

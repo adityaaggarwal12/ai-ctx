@@ -10,7 +10,7 @@ import { ftsBody } from "./ingest";
 import { inList, projectBySlugOrId, scopeIds } from "./project";
 import { ftsQuery, queryTerms } from "./search";
 
-const SYSTEM = `You maintain a shared project memory for AI coding agents. Several agent sessions (different tools) work on the same project; your notes are how they learn what was decided in other sessions.
+export const SYSTEM = `You maintain a shared project memory for AI coding agents. Several agent sessions (different tools) work on the same project; your notes are how they learn what was decided in other sessions.
 
 You receive EXISTING MEMORY (with ids) and NEW TURNS from one session. Propose memory operations. Most batches deserve ZERO operations: return {"ops": []} unless something will change how a future session should act.
 
@@ -132,7 +132,13 @@ interface TurnRow {
 
 const TRIVIAL = /^(y|yes|no|ok|okay|k|sure|continue|go|go ahead|do it|proceed|thanks|thank you|ty|great|nice|cool|\/\S+)\W*$/i;
 
-function turnBlock(t: TurnRow, n: number): string {
+/** The extractor's user message: existing memory (with ids it can target) plus the new turn blocks. */
+export function buildPrompt(slug: string, existing: Pick<Fact, "id" | "type" | "text" | "why">[], blocks: string[]): string {
+  const memory = existing.length ? existing.map((f) => `[${f.id}] ${f.type}: ${f.text}${f.why ? " — " + f.why : ""}`).join("\n") : "(empty)";
+  return `PROJECT: ${slug}\n\nEXISTING MEMORY:\n${memory}\n\nNEW TURNS:\n${blocks.join("\n\n")}\n\nReturn {"ops": [...]} (usually empty).`;
+}
+
+export function turnBlock(t: Pick<TurnRow, "ts_start" | "harness" | "branch" | "user" | "assistant" | "tools">, n: number): string {
   const date = new Date(t.ts_start * 1000).toISOString().slice(0, 16).replace("T", " ");
   const tools = t.tools ? t.tools.split("\n").slice(0, 12).join("\n") : "";
   const assistant = t.assistant.length > 1800 ? "…" + t.assistant.slice(-1800) : t.assistant;
@@ -231,10 +237,7 @@ export async function extractSession(sessionId: string, project: string, llm: Ll
 
   const existing = relevantFacts(project, blocks.join("\n"));
   const proj = projectBySlugOrId(project);
-  const memory = existing.length
-    ? existing.map((f) => `[${f.id}] ${f.type}: ${f.text}${f.why ? " — " + f.why : ""}`).join("\n")
-    : "(empty)";
-  const prompt = `PROJECT: ${proj?.slug ?? project}\n\nEXISTING MEMORY:\n${memory}\n\nNEW TURNS:\n${blocks.join("\n\n")}\n\nReturn {"ops": [...]} (usually empty).`;
+  const prompt = buildPrompt(proj?.slug ?? project, existing, blocks);
 
   let res: LlmResult;
   try {
