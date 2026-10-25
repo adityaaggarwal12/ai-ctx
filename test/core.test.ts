@@ -17,7 +17,8 @@ const { openDb } = await import("../src/db");
 const { renderBrief } = await import("../src/brief");
 const { loadConfig } = await import("../src/config");
 const { findDuplicate, duplicatePairs } = await import("../src/dedupe");
-const { extractSession } = await import("../src/extract");
+const { extractSession, extractSince } = await import("../src/extract");
+const { setMeta } = await import("../src/db");
 
 describe("redact", () => {
   test("known token formats", () => {
@@ -175,5 +176,15 @@ describe("dedupe", () => {
     expect(kept.origin).toBe("user");
     expect(kept.confidence).toBe(0.9);
     expect(duplicatePairs(activeFacts("dd2"))).toHaveLength(0);
+  });
+});
+
+describe("backfill", () => {
+  test("widens the extraction window only while set", () => {
+    const now = Date.now() / 1000;
+    expect(extractSince(now)).toBeCloseTo(now - 10 * 86400, 0);
+    setMeta("backfill_since", String(now - 60 * 86400));
+    expect(extractSince(now)).toBeCloseTo(now - 60 * 86400, 0);
+    openDb().query("DELETE FROM meta WHERE k = 'backfill_since'").run();
   });
 });

@@ -3,9 +3,9 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { oneLine } from "./adapters/types";
 import { AGING, renderBrief, writeLive } from "./brief";
 import { loadConfig, paths } from "./config";
-import { getMeta, openDb, usageToday } from "./db";
+import { getMeta, openDb, setMeta, usageToday } from "./db";
 import { callDaemon, daemonPid, runDaemon } from "./daemon";
-import { extractPending, pendingSessions } from "./extract";
+import { estimateBacklog, extractPending, extractSince, pendingSessions } from "./extract";
 import { duplicatePairs } from "./dedupe";
 import { emit, getFact, newFactId, rebuildFacts, FACT_TYPES, type Fact, type FactType } from "./facts";
 import { formatHit, handleHook, hookOutput, projectForCwd, shortTurnId, type Harness, type HookEvent } from "./hooks";
@@ -32,7 +32,7 @@ function positional(): string[] {
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("-")) {
-      if (!a.includes("=") && i + 1 < argv.length && !["--json", "--all", "--apply", "--dry-run", "--inactive"].includes(a)) i++;
+      if (!a.includes("=") && i + 1 < argv.length && !["--json", "--all", "--apply", "--dry-run", "--inactive", "--off"].includes(a)) i++;
       continue;
     }
     out.push(a);
@@ -91,6 +91,7 @@ Writing
 Admin
   ctx status | ctx doctor
   ctx scan | ctx extract [--dry-run] | ctx rebuild
+  ctx backfill --days 60 [--dry-run] | ctx backfill --off   extract older history within the daily cap
   ctx install [--apply] | ctx uninstall [--apply]
   ctx daemon                         run ctxd in the foreground
   ctx hook <claude|codex> <session-start|prompt>   (used by harness hooks; reads JSON on stdin)
@@ -140,6 +141,28 @@ async function main() {
       }
       const res = await extractPending({ maxSessions: Number(opt("max") ?? 10), log: (r) => console.log(`${r.session.slice(0, 8)}: ${r.turns} turns → ${r.ops} ops${r.skipped ? ` (${r.skipped})` : ""}`) });
       if (!res.length) console.log("nothing pending");
+      return;
+    }
+
+    case "backfill": {
+      if (flag("off")) {
+        openDb().query("DELETE FROM meta WHERE k = 'backfill_since'").run();
+        return console.log("backfill off; extraction is back to the last " + loadConfig().extract.horizonDays + " days");
+      }
+      const days = Number(opt("days"));
+      if (!days || days <= 0) return console.error("usage: ctx backfill --days <n> [--dry-run] | ctx backfill --off");
+      const since = Math.min(Date.now() / 1000 - days * 86400, extractSince());
+      const est = estimateBacklog(since);
+      const cfg = loadConfig().extract;
+      const u = openDb().query("SELECT SUM(calls) calls, SUM(cost) cost FROM usage WHERE kind = 'extract'").get() as any;
+      const perCall = u?.calls ? u.cost / u.calls : 0.004;
+      console.log(
+        `${est.sessions} sessions, ${est.turns} turns since ${new Date(since * 1000).toISOString().slice(0, 10)} → about ${est.calls} model calls, ~$${(est.calls * perCall).toFixed(2)} list price, ` +
+          `${Math.max(1, Math.ceil(est.calls / cfg.maxCallsPerDay))} day(s) at ${cfg.maxCallsPerDay} calls/day (new chats always go first).`,
+      );
+      if (flag("dry-run")) return;
+      setMeta("backfill_since", String(since));
+      console.log(daemonPid() ? "backfill scheduled; ctxd works through it in the background (see ctx status)." : "backfill scheduled; it runs once ctxd is up.");
       return;
     }
 
@@ -356,6 +379,11 @@ async function main() {
       console.log(`turns: ${c("SELECT COUNT(*) n FROM turns")} (embedded ${c("SELECT COUNT(*) n FROM turns WHERE embedded = 1")}), sessions: ${c("SELECT COUNT(*) n FROM sessions WHERE skip = 0")}, active facts: ${c("SELECT COUNT(*) n FROM facts WHERE status = 'active'")}`);
       const u = usageToday("extract");
       console.log(`extraction today: ${u.calls}/${cfg.extract.maxCallsPerDay} calls, ${u.failures} failures, ~$${u.cost.toFixed(3)} list-price; pending sessions: ${pendingSessions().length}`);
+      const bf = getMeta("backfill_since");
+      if (bf) {
+        const left = estimateBacklog(Number(bf));
+        console.log(`backfill since ${new Date(Number(bf) * 1000).toISOString().slice(0, 10)}: ~${left.calls} calls left (${left.sessions} sessions)${left.calls ? "" : " — done; ctx backfill --off to clear"}`);
+      }
       const last = getMeta("last_scan");
       if (last) console.log(`last scan: ${ago(Number(last))}`);
       if (existsSync(paths.db)) console.log(`index: ${(statSync(paths.db).size / 1e6).toFixed(1)} MB at ${paths.db}`);

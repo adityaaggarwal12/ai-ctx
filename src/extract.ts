@@ -3,7 +3,7 @@
 import { oneLine } from "./adapters/types";
 import { writeLive } from "./brief";
 import { loadConfig, paths } from "./config";
-import { bumpUsage, openDb, usageToday } from "./db";
+import { bumpUsage, getMeta, openDb, usageToday } from "./db";
 import { factWords, findDuplicate, similarity, strongerOrigin, DUP_SIM } from "./dedupe";
 import { activeFacts, emit, FACT_TYPES, newFactId, type Fact, type FactEvent } from "./facts";
 import { ftsBody } from "./ingest";
@@ -160,7 +160,14 @@ function relevantFacts(project: string, text: string): Fact[] {
   return [...picked.values()];
 }
 
-/** Sessions with enough completed, unextracted turns (or idle ones with any). */
+/** Oldest turn time extraction covers: horizonDays back, or further while a `ctx backfill` is set. */
+export function extractSince(now = Date.now() / 1000): number {
+  const recent = now - loadConfig().extract.horizonDays * 86400;
+  const backfill = Number(getMeta("backfill_since") ?? 0);
+  return backfill ? Math.min(recent, backfill) : recent;
+}
+
+/** Sessions with enough completed, unextracted turns (or idle ones with any). Newest first, so live chats beat a backfill. */
 export function pendingSessions(now = Date.now() / 1000): { session_id: string; project: string; n: number }[] {
   const cfg = loadConfig().extract;
   return openDb()
@@ -172,7 +179,7 @@ export function pendingSessions(now = Date.now() / 1000): { session_id: string; 
        GROUP BY t.session_id, t.project HAVING n >= ? OR last < ?
        ORDER BY last DESC`,
     )
-    .all(now - cfg.horizonDays * 86400, cfg.minTurns, now - cfg.idleSeconds) as any[];
+    .all(extractSince(now), cfg.minTurns, now - cfg.idleSeconds) as any[];
 }
 
 export interface ExtractReport {
@@ -323,4 +330,25 @@ export async function extractPending(opts: { maxSessions?: number; llm?: Llm; lo
     }
   }
   return out;
+}
+
+/** Rough size of extracting everything pending since `since`: sessions, turns and model calls. */
+export function estimateBacklog(since: number): { sessions: number; turns: number; calls: number } {
+  const cfg = loadConfig().extract;
+  const rows = openDb()
+    .query(
+      `SELECT t.id, t.session_id, t.project, t.harness, t.branch, t.idx, t.ts_start, t.user, t.assistant, t.tools FROM turns t JOIN sessions s ON s.id = t.session_id
+       WHERE t.extracted = 0 AND t.complete = 1 AND t.project IS NOT NULL AND s.skip = 0 AND t.ts_end > ? ORDER BY t.session_id, t.idx`,
+    )
+    .all(since) as TurnRow[];
+  const chars = new Map<string, number>();
+  let turns = 0;
+  for (const t of rows) {
+    if (TRIVIAL.test(t.user.trim()) && t.assistant.length < 400) continue;
+    turns++;
+    chars.set(t.session_id, (chars.get(t.session_id) ?? 0) + Math.min(turnBlock(t, 1).length, cfg.maxInputChars));
+  }
+  let calls = 0;
+  for (const n of chars.values()) calls += Math.ceil(n / cfg.maxInputChars);
+  return { sessions: chars.size, turns, calls };
 }

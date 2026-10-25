@@ -58,7 +58,9 @@ For a chat that was already open before you installed ctx, ask the agent to run
   --all` and `LIVE.md` still show everything.
 - `ignoreCwd`: path fragments to never ingest.
 - `extract`: `model`, `maxCallsPerDay` (default 200), `horizonDays` (only recent
-  turns get extracted; older history stays searchable), `enabled`.
+  turns get extracted; older history stays searchable), `enabled`. To extract older
+  history once, `ctx backfill --days 60` (try `--dry-run` for a cost estimate); it runs
+  in the background within the daily cap, after any new chats.
 - `brief.staleDays` (default 30): todos and gotchas not confirmed for this long drop out
   of the brief; `ctx review` lists them to mark done, retract or keep.
 - `embed.enabled`: local EmbeddingGemma vectors for hybrid search (about 1.5 GB RAM
