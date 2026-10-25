@@ -1,9 +1,19 @@
-# Research: cross-harness context for AI coding agents
+# Research: shared context for AI coding agents
 
-Date: 2026-10-25. Four parallel research passes: existing projects + user feedback,
-memory write-side (extraction/consolidation), read-side (retrieval/RAG), and
-harness integration (verified on this machine). Numbers are mostly vendor
-self-reports unless marked; no public benchmark covers coding sessions.
+Before building `ctx`, we studied existing memory tools for AI agents, what their users
+complain about, and what the research says about storing and retrieving memory. This page
+records what we found and the choices it led to.
+
+How to read it:
+
+- **Section 1** lists similar projects and what each one teaches.
+- **Section 2** lists the ways these tools fail in real use.
+- **Section 3** compares conflicting practices, best option first. A ✅ marks what `ctx`
+  does.
+- **Section 4** lists facts about Claude Code and Codex, checked on the author's machine.
+
+Research date: 2026-10-25. Most numbers are self-reported by vendors unless noted. No public
+benchmark covers coding sessions yet.
 
 ## 1. What already exists
 
@@ -160,7 +170,7 @@ Wrap injected context in markers and strip it on ingest (stops the feedback loop
 Inject only user text and derived facts, labeled as reference data, never raw
 tool/web output. Store files 0600 in a 0700 directory.
 
-## 4. Verified integration facts (this machine)
+## 4. Verified integration facts (author's machine)
 
 - Claude Code 2.1.309: transcripts in `~/.claude/projects/<enc-cwd>/<sid>.jsonl`,
   appended per turn. Records carry `cwd`, `gitBranch`, `sessionId`, `uuid`,
@@ -173,8 +183,9 @@ tool/web output. Store files 0600 in a 0700 directory.
   `guardian` subagent sessions.
 - Hooks: both CLIs support SessionStart/UserPromptSubmit with
   `hookSpecificOutput.additionalContext`. Codex silently skips untrusted hooks until
-  approved in `/hooks`; its trust key includes the handler index, and Orca rewrites
-  its own entries, so ours go first (index 0) with a fixed command string.
+  approved in `/hooks`; its trust key includes the handler index. The first plan was to
+  put ours first (index 0). Testing showed that shifts other tools' entries and silently
+  un-approves them, so `ctx` appends its hooks at the end, with a fixed command string.
 - Orca and Conductor both report `entrypoint: sdk-ts`. Detect the harness from env
   vars and cwd prefix (`~/orca/workspaces/`, `~/conductor/workspaces/`).
 - Worktrees of one repo share an origin URL → project id = normalized origin

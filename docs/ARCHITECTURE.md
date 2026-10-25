@@ -1,216 +1,330 @@
-# ctx: central context for AI coding harnesses
+# How ctx works
 
-Plan derived from [RESEARCH.md](RESEARCH.md). Letters in brackets (e.g. [A1]) refer
-to the ranked decisions there.
+This page explains what happens between an agent writing a chat log and another agent getting
+a brief. For why it is built this way, see [RESEARCH.md](RESEARCH.md).
 
-## Goal
+## The big picture
 
-Any Claude Code or Codex session, in Orca, Conductor or a plain terminal, on the
-laptop or the VM, starts with the current state of the project it's in. That state
-includes what other sessions decided, rejected and finished, even sessions that
-are still running. No session has to end, and no MCP connection is needed.
+```mermaid
+flowchart TB
+    subgraph Agents["Your agents"]
+        CC["Claude Code<br/>~/.claude/projects/*.jsonl"]
+        CX["Codex<br/>~/.codex/sessions/*.jsonl"]
+    end
 
-## Non-goals (v1)
+    subgraph Daemon["ctxd (background daemon)"]
+        W["Watcher<br/>file events + 30 s rescan"]
+        P["Adapters<br/>one per tool"]
+        R["Redaction<br/>secrets removed first"]
+        X["Extractor<br/>batches turns, calls Haiku"]
+        V["Reducer<br/>applies memory changes"]
+        E["Embedder<br/>local model, worker thread"]
+        S["Socket API<br/>answers hooks"]
+    end
 
-Browser chats (ChatGPT, claude.ai), team sharing, cloud hosting, an MCP server.
-Codebase indexing is out too: agents already grep code well [I2].
+    subgraph Store["~/.ctx"]
+        AR[("archive/<br/>cleaned turns")]
+        EV[("events/<br/>memory change log")]
+        DB[("index.sqlite<br/>search + facts")]
+        LV["projects/*/LIVE.md"]
+    end
 
-## Architecture
-
-```
- Claude Code / Codex transcripts (append-only JSONL, written each turn)
-        │  watched; offsets tracked; hints from fs events + 30 s rescan backstop
-        ▼
- ctxd (Bun daemon, launchd/systemd)
-   adapters/claude, adapters/codex → normalized Turn {user, assistant, tools, files}
-   redact (before anything else) ── strip <ctx-context> blocks we injected
-   project resolver: cwd → git origin → "host/owner/repo"
-   ├─ archive/<machine>/<session>.jsonl      redacted turns, source of truth [A1]
-   ├─ index.sqlite  turns + FTS5 + embeddings (rebuildable)            [I1,K1]
-   ├─ extractor (batched, gated, budgeted) → events/<machine>/YYYY-MM.jsonl [B1,E1]
-   │     reducer → facts table → projects/<slug>/LIVE.md               [B1,G1]
-   └─ unix-socket HTTP API for hooks and the CLI (embeddings warm in memory)
-        ▲
- ctx (CLI + hook entrypoints; falls back to direct read-only SQLite if ctxd is down)
-   SessionStart       → stable brief, ≤ ~6k chars                      [F1]
-   UserPromptSubmit   → gated hybrid recall, ≤3 snippets or silence     [F1,I1]
-   search/show/tail/sessions/brief/note/reject/retract/status/doctor
-```
-
-## Data model
-
-**Turn** (one user prompt + everything up to the next prompt) [J]:
-`id, session_id, project, machine, source(claude|codex), harness(orca|conductor|codex-desktop|claude-desktop|cli),
-cwd, branch, idx, ts_start, ts_end, user, assistant (final prose), tools (condensed lines), files[]`.
-
-**Fact event** (append-only):
-`{id, ts, machine, project, op: add|supersede|retract|done|reaffirm, target?, type, text, why,
-files[], origin: user|agreed|agent|manual, confidence, session, turns[], quote}`.
-Fact types: `decision`, `rejected`, `gotcha`, `todo`, `progress`, `preference`.
-
-**Reducer** → `facts(id, project, type, text, why, files, origin, confidence, status:
-active|superseded|retracted|done, superseded_by, created, updated, session, turns)`.
-It is deterministic and replayable (`ctx rebuild`).
-
-**Project id**: normalized origin URL (`github.com/owner/repo`), else
-`root:<first-commit-sha>`, else `dir:<realpath>`. Slug = the last path segment, with
-a suffix added if two projects collide.
-
-## Capture rules (lessons from claude-mem / Mem0 failures)
-
-- Human prompts only. Skip `isMeta`, tool_result, task notifications, compact
-  summaries, sidechains (subagents). Skip Codex `guardian` sessions and injected
-  `<environment_context>`/`<system_instruction>` blocks. Strip `<ctx-context>` (our
-  own output) so we never re-extract what we injected (mem0 #4573: "User prefers
-  Vim" ×808).
-- Tool activity is condensed to one line each (`$ cmd → exit`, `edit path`,
-  `error: …`). File bodies and diffs are never stored or sent to the LLM (claude-mem
-  #5023).
-- Redact secrets before truncation and storage [P].
-- Ignore sessions whose cwd is inside `~/.ctx`, and extractor calls (run with
-  `--no-session-persistence`).
-
-## Extraction
-
-- Trigger per session: ≥3 completed unextracted turns, or ≥1 when the session has
-  been idle for 120 s.
-- Input: the batch of turns (each capped) plus up to 40 existing active facts for the
-  project (FTS-ranked against the batch, plus the most recent), with ids. That lets
-  the model dedupe and emit `supersede`.
-- Model: `claude -p --model haiku` with tools, settings, MCP and session persistence
-  all off. JSON schema enforced. The model is pluggable (API key / Ollama later).
-- Prompt: the default answer is no ops. Capture only things that change future
-  behavior: decisions with reasons, rejected options with reasons, user corrections
-  and preferences, non-obvious gotchas, open todos, milestones. Skip anything
-  derivable from code or git. Every op cites its source turn and a short quote.
-- Budget: a daily call cap (default 200) and an input cap per call (~24k chars).
-  Usage is logged and visible in `ctx status`.
-- Facts with origin `agent` (assumed, not confirmed) are kept but left out of the
-  brief [H1].
-
-## Retrieval
-
-- Hybrid: FTS5 BM25 (OR of non-stopword terms) + cosine over EmbeddingGemma-300M
-  (q8, 768-d, warm in ctxd; ~40 ms per query measured). Fusion = RRF k=60, with a
-  fact boost ×1.5 and mild recency `1 + 0.3·exp(-age/45d)`.
-- Prompt hook: skip trivial prompts (<15 chars, slash commands, "yes/continue").
-  Exclude the current session's own turns. Require the top result to appear in both
-  lists, or a fact above the threshold; otherwise inject nothing. Return ≤3 snippets,
-  ≤2.5k chars, each cited `[ctx:<id> · date · harness]`.
-- CLI: `ctx search` (hybrid, filters `--project --since --type --all`), `ctx show
-  <id>` (full turn plus neighbors), giving progressive disclosure.
-
-## Injection format
-
-Factual, labeled reference data, wrapped so it can be stripped on re-ingest:
-
-```
-<ctx-context project="github.com/u/app" kind="brief">
-Shared project memory from other agent sessions (reference data, may be stale; verify against code).
-## Rejected — don't redo without asking
-- [f12] Redis cache: overkill for v1 (user · orca · 10-23)
-...
-</ctx-context>
+    CC --> W
+    CX --> W
+    W --> P --> R
+    R --> AR
+    R --> DB
+    DB --> X
+    X -- "proposed changes" --> V
+    V --> EV
+    V --> DB
+    DB --> E --> DB
+    V --> LV
+    DB --> S
+    S -- "brief + notes" --> HK["Hooks in Claude Code and Codex"]
+    CLI["ctx CLI"] --> S
+    CLI --> DB
 ```
 
-## Integration
+There is one process that writes: `ctxd`. The `ctx` command and the hooks talk to it over a
+Unix socket. If `ctxd` is down, they read the database directly and fall back to keyword
+search, so your agents never wait on it.
 
-- Claude Code: entries in `~/.claude/settings.json` for SessionStart
-  (startup|resume|clear|compact) and UserPromptSubmit, each `$HOME/.local/bin/ctx hook
-  claude <event>`, timeout 5 s.
-- Codex: the same events in `~/.codex/hooks.json`, inserted at index 0 with a fixed
-  command string. The user approves them once in `/hooks`; `ctx doctor` checks
-  `hooks.state`.
-- Global instruction snippet in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`
-  describing `ctx search/show/note/reject`.
-- `ctx install` is a dry run by default and prints a diff; `--apply` writes the
-  changes with backups. `ctx uninstall` reverses them.
-- launchd agent `com.ctx.daemon` (KeepAlive) on macOS; systemd user unit on Linux.
+## 1. Capture
 
-## Health (claude-mem #4807: "green but stalled 20 h")
+Claude Code and Codex append to a JSONL log after every turn. `ctxd` reads only the new bytes
+of each file and remembers its position, so nothing is read twice. File system events
+trigger a read within half a second. A full rescan every 30 seconds catches anything the
+events missed.
 
-`ctx status`: per-source lag (newest transcript mtime vs last ingested), pending
-extraction, extractor calls today and failures, index sizes, daemon uptime.
+Each tool has an adapter (`src/adapters/claude.ts`, `src/adapters/codex.ts`) that turns raw
+log records into one shape:
 
-## Sync with the VM (phase 3)
+| Field | What it holds |
+|---|---|
+| `user` | Your message, cleaned of injected system text |
+| `assistant` | The agent's reply text |
+| `tools` | One line per tool call, such as `$ npm test → exit 1` or `edit src/app.ts` |
+| `files` | Paths the agent edited |
+| `branch`, `cwd`, `harness` | Where it happened: Orca, Conductor, Codex or a terminal |
 
-Syncthing or rsync of `archive/` and `events/` (each machine writes only its own
-subdirectory). The other machine's data is ingested into a local index; SQLite files
-are never synced.
+What gets skipped:
 
-## Phases
+- tool output, file contents and diffs (never stored)
+- subagent chats, compaction summaries and task notifications
+- helper calls from tools, like Orca's chat-title generator
+- any `<ctx-context>` block that `ctx` itself injected, so memory never feeds on itself
 
-1. **Core**: adapters, redaction, project resolver, archive, SQLite + FTS, the daemon
-   watch loop, CLI (`status sessions search show tail`). Backfill existing
-   transcripts.
-2. **Memory**: extractor, events, reducer, LIVE.md, `brief note reject retract`.
-3. **Hooks**: hook entrypoints, `install` (dry run / apply), `doctor`, launchd.
-4. **Embeddings**: warm model in ctxd, background embedding backlog, hybrid fusion.
-5. **Later**: VM sync, consolidation pass on idle sessions (resolve provisional
-   items), file-scoped guardrail via PreToolUse, a reranker in the CLI, a staleness
-   check against git, an eval set (60–100 queries from real history, ~20%
-   negatives) to tune thresholds.
+Secrets are removed **before** anything is truncated, stored or sent. The rules cover common
+key formats (Anthropic, OpenAI, GitHub, AWS, Stripe, Slack and more), JWTs, bearer tokens,
+passwords in URLs, private keys, and `key=value` pairs whose name suggests a secret.
 
-## Status (2026-10-25)
+A turn is complete when the agent finishes its reply, or after 10 minutes without activity.
+Long replies are trimmed to the first 1,500 and last 4,500 characters. The end of a reply
+usually holds the outcome.
 
-Phases 1–4 are built and tested against this machine's real history (scratch store,
-read-only): 9,883 turns from 170 sessions backfilled in 55 s. Changes from the
-original plan, found while testing:
+## 2. Which project is this?
 
-- **Branch-scoped projects.** `conductor-playground` holds unrelated ideas, one per
-  worktree branch, so per-repo `branchScopedRepos` makes `<repo>#<branch>` the
-  project id.
-- **Embeddings run in a worker thread** at low priority. On the main thread, a
-  backfill froze hook responses. Query embedding has a 600 ms deadline; past it the
-  hook answers lexical-only. Vectors cover the last 90 days (`embed.horizonDays`);
-  older turns stay keyword-searchable.
-- **Extraction horizon** of 10 days, so installing doesn't trigger extraction over
-  months of history.
-- **Harness helper sessions skipped** (e.g. Orca's chat-titling call).
-- **App copied to `~/.ctx/app`** on install, so archiving the source worktree can't
-  break hooks.
-- **Codex hooks appended at the end** of each event list. Inserting at index 0 would
-  shift Orca's trusted entries and silently disable them.
+Many folders can belong to one project, for example several git worktrees of one repo in
+Orca and Conductor. `ctx` gives them all the same project id.
 
-- **Injection bar calibrated** on 9 queries from this machine: relevant top-hit cosine
-  0.55–0.68, unrelated 0.39–0.51, so `recall.minSim = 0.53`. This is a tiny sample;
-  build the real eval set before tuning further.
-- **Independent code review** found 14 issues, all fixed with regression tests (17
-  tests in total):
-  - **Ingestion survives bad records.** Errors are caught per line and per file, so
-    one malformed record can't halt ingestion.
-  - **Offsets are saved atomically** with each flush, and a single-writer lock stops
-    a second daemon or `ctx scan` from ingesting the same files.
-  - **Claude turns close on `stop_reason: end_turn`** (10 min idle is the fallback).
-    Turns that grow after extraction are extracted again.
-  - **Rewritten files keep their extraction flags**, so unchanged turns aren't
-    extracted twice.
-  - **The archive only stores completed turns.**
-  - **A session keeps the project of its first cwd**, so agents `cd`-ing around don't
-    move it.
-  - **Interrupt markers are dropped.**
-  - **The embedding worker recovers from crashes** and drops queries whose deadline
-    has passed.
-  - **Failed extractions back off** exponentially per session.
-  - **Uninstall removes only ctx's handlers**, config writes are atomic, and the shim
-    falls back to `bun` on PATH.
-  - **Redaction catches more secrets** (passwords, SendGrid, Google OAuth, Telegram,
-    and so on) with fewer false matches on code (`authHeader`, `tokenizer`).
-  - **Hooks have a hard 4 s ceiling.**
-  - **Search handles non-ASCII terms.**
+```mermaid
+flowchart TD
+    A["Session starts in a folder"] --> B{"Inside a git repo?"}
+    B -- yes --> C{"Has an origin remote?"}
+    C -- yes --> D["github.com/owner/repo"]
+    C -- no --> E["root:first-commit-sha"]
+    B -- no --> F{"A deleted Orca or<br/>Conductor workspace?"}
+    F -- yes --> G["Same project as<br/>its sibling workspaces"]
+    F -- no --> H["dir:folder-path"]
+    D --> I{"Repo listed in<br/>branchScopedRepos?"}
+    I -- yes --> J["repo#branch"]
+    I -- no --> K["Project id"]
+    E --> K
+    G --> K
+    H --> K
+    J --> K
+```
 
-Measured: direct (no daemon) hook ≈ 50 ms; via daemon 80–300 ms with vectors
-(0.35–0.75 s during the initial embedding backfill).
-One extraction call on a 5-turn batch took 22 s and cost about $0.005 at list price.
+A session keeps the project of the folder it started in, even if the agent later `cd`s
+elsewhere.
 
-## Acceptance checks
+Three settings adjust this:
 
-- A decision made in a live Orca session shows up in `ctx brief` within ~3 turns,
-  without the session ending.
-- A new Codex session in a different worktree of the same repo gets that brief at
-  start.
-- A prompt about a past topic injects a cited snippet; a trivial or unrelated prompt
-  injects nothing.
-- Killing ctxd doesn't break or slow any harness (hooks fail open within timeout).
-- Re-running extraction on the same turns doesn't duplicate facts; injected
-  `<ctx-context>` is never ingested.
+- **`branchScopedRepos`**: a repo where each branch is a separate idea gets one project per
+  branch.
+- **`projectAliases`**: a new project id can also see the memory of an old one, for example
+  after moving a branch into its own repo.
+- **`mixedProjects`**: a catch-all folder where you start agents for unrelated tasks. Its
+  brief skips topic facts, which would mostly be about other tasks.
+
+## 3. Remember
+
+### When extraction runs
+
+Every 20 seconds, `ctxd` looks for sessions with new completed turns. A session is ready when
+it has 3 or more new turns, or when it has been idle for 2 minutes. The newest sessions go
+first, so a fresh chat gets its memory quickly even during a large backfill.
+
+### What the model sees
+
+```mermaid
+flowchart LR
+    T["New turns<br/>(about 24k characters max)"] --> PR["Prompt"]
+    F["Up to 40 existing facts,<br/>with their ids"] --> PR
+    PR --> H["Haiku via claude -p<br/>no tools, no settings,<br/>JSON schema enforced"]
+    H --> O["Proposed changes:<br/>add, supersede, retract,<br/>done, reaffirm"]
+    O --> D{"Restates an<br/>existing fact?"}
+    D -- yes --> SU["Turned into a supersede:<br/>new wording wins"]
+    D -- no --> AD["Saved as new"]
+```
+
+The prompt tells the model that the right answer is usually "nothing". It may only save:
+
+| Type | Example |
+|---|---|
+| `decision` | Use SQLite, not Postgres. Why: single user. |
+| `rejected` | Do not add a Redis cache. Why: overkill for v1. |
+| `preference` | Answer with short checklists, not long prose. |
+| `gotcha` | Vitest 3 hangs on Node 26; keep Node 24. |
+| `todo` | Add rate limiting to /signup later. |
+| `progress` | v1 is live in production. |
+
+Each saved fact records who it came from:
+
+- **user**: you said it
+- **agreed**: the agent proposed it and you went along
+- **agent**: the agent assumed it
+
+Facts from `agent` stay out of the brief unless the model is very confident.
+
+### Duplicates
+
+The model only sees about 40 existing facts, so on big projects it can save a reworded copy
+of something already known. Before saving, `ctx` compares the new fact with every fact of
+the same type in the project. If the words overlap enough (Jaccard similarity 0.45 or more),
+the new fact replaces the old one instead of sitting next to it. It keeps the stronger
+origin, so restating your words never downgrades them. `ctx dedupe` applies the same check to
+memory you already have.
+
+### The memory log
+
+Memory is never edited in place. Every change is appended to `events/<machine>/YYYY-MM.jsonl`,
+and a reducer applies it to the `facts` table. Rebuilding from the log always gives the same
+result, which makes mistakes easy to undo and keeps the door open for syncing machines.
+
+```mermaid
+stateDiagram-v2
+    [*] --> active: add
+    active --> superseded: supersede
+    active --> retracted: retract
+    active --> done: done
+    active --> active: reaffirm
+    superseded --> [*]
+    retracted --> [*]
+    done --> [*]
+```
+
+- **supersede**: a newer fact replaces this one.
+- **retract**: it was wrong (`ctx retract`).
+- **done**: a todo was finished (`ctx done`).
+- **reaffirm**: it is still true, so its age resets (`ctx keep`).
+
+Each fact is dated by the turn it came from, not by when extraction ran. That keeps a
+backfill from making old facts look new.
+
+## 4. Recall
+
+### The session brief
+
+```mermaid
+sequenceDiagram
+    participant A as Agent (Claude Code or Codex)
+    participant H as ctx hook
+    participant D as ctxd
+    A->>H: SessionStart (folder, session id)
+    H->>D: /hook over Unix socket (3 s limit)
+    D->>D: Resolve project, build brief
+    D-->>H: Brief text
+    H-->>A: additionalContext
+    Note over H: Daemon down? Read SQLite directly.<br/>Anything slow? Exit quietly at 4 s.
+```
+
+The brief holds, in order:
+
+1. other sessions on this project from the last 3 days, with their latest question
+2. rejected ideas
+3. decisions
+4. your preferences
+5. gotchas
+6. open todos
+7. progress from the last 7 days
+
+It is capped at 6,000 characters. Todos and gotchas that nobody has confirmed for 30 days
+drop out, with a pointer to `ctx review`.
+
+### Notes per prompt
+
+```mermaid
+flowchart TD
+    P["You send a prompt"] --> Q{"Short, a slash command,<br/>or just 'ok' / 'yes'?"}
+    Q -- yes --> N["Add nothing"]
+    Q -- no --> S["Search this project:<br/>keywords + local vectors"]
+    S --> C{"Any result close enough?<br/>(similarity ≥ recall.minSim)"}
+    C -- no --> N
+    C -- yes --> F{"Already in this<br/>session's brief?"}
+    F -- yes --> N
+    F -- no --> I["Add up to 3 notes,<br/>2,500 characters max,<br/>each with an id to expand"]
+```
+
+Silence is the default. Adding text to every prompt makes agents drift and slows them
+down, so a note only appears when it clearly matches.
+
+### Search and ranking
+
+Search combines two methods:
+
+- **Keywords**: SQLite FTS5 with BM25, matching any of the important words in the query
+- **Meaning**: cosine similarity over vectors from EmbeddingGemma-300M, which runs locally
+  in a worker thread
+
+The two ranked lists are merged with reciprocal rank fusion (k = 60). Then:
+
+- facts score 1.5 times higher than raw turns, and rejected ideas 1.8 times higher
+- recent items get a small boost that fades over about 45 days
+
+Vectors cover the last 90 days. Older turns stay findable by keyword. A query vector has
+600 ms to compute; past that, the hook answers with keywords alone.
+
+Every searched prompt logs its scores (never the prompt itself) to `logs/recall.jsonl`.
+`ctx recall-stats` shows where scores fall around `recall.minSim`, which helps tune it as
+memory grows.
+
+## 5. Timing and limits
+
+| What | Limit |
+|---|---|
+| Hook timeout set in Claude Code and Codex | 5 s |
+| `ctx hook` hard exit | 4 s |
+| Wait for the daemon | 2.5 s per prompt, 3 s at session start |
+| Query vector | 600 ms, then keywords only |
+| Memory calls | 200 a day by default |
+| Input per memory call | about 24,000 characters |
+| Extraction window | last 10 days, or further with `ctx backfill` |
+
+Measured on the author's Mac: a hook answers in 80 to 300 ms through the daemon, or about
+50 ms when reading SQLite directly. A memory call on a 5-turn batch takes about 20 seconds
+and costs about $0.004 at list price.
+
+## 6. Housekeeping
+
+| Job | How often |
+|---|---|
+| Rescan chat logs | every 30 s |
+| Close idle turns | every 15 s (after 10 min idle) |
+| Extract memory | every 20 s, up to 3 sessions |
+| Embed new turns and facts | every 10 s |
+| Refresh `LIVE.md` files | every 5 min |
+| Compact the archive (drop older copies of a turn) | once a day |
+
+## 7. Measuring memory quality
+
+`bun run eval` runs 15 hand-labelled conversations (in `eval/cases.json`) through the real
+extraction prompt. It reports:
+
+- facts it should have saved, and did
+- facts it saved by mistake
+- any secret that leaked into memory
+
+Cases cover each fact type and things that must produce nothing, such as routine edits,
+questions and the agent's own guesses.
+
+Current baseline: every expected fact is found, but the model adds about 6 extra facts
+across 15 cases. It tends to restate one event as two facts, and to log routine work as
+progress. Tighten the prompt, then rerun the eval to confirm.
+
+## 8. Lessons from building it
+
+These came from testing against real history (about 9,000 turns from 170 sessions):
+
+- **Embeddings run in a worker thread.** On the main thread, a large backfill froze hook
+  answers.
+- **Extraction starts with only the last 10 days.** Otherwise installing would kick off
+  hundreds of model calls on old history.
+- **The app is copied to `~/.ctx/app`.** Deleting or archiving the source folder can't break
+  the hooks.
+- **Codex hooks are added at the end of each list.** Codex remembers approvals by position,
+  so inserting first would quietly un-approve other tools' hooks.
+- **The recall threshold (0.53) came from real queries.** Relevant matches scored 0.55 to
+  0.68 and unrelated ones 0.39 to 0.51. It is a small sample, so `ctx recall-stats` exists
+  to re-check it.
+- **A catch-all folder needs different treatment.** One scratch folder had collected 136
+  facts about unrelated tasks, so mixed folders now get a brief without topic facts.
+
+## 9. Not built yet
+
+- **Syncing between machines.** The plan: each machine writes only its own `archive/` and
+  `events/` folders and syncs them with Syncthing or git. The daemon would need to pick up
+  new event lines as they arrive (today it only replays the log on a fresh start).
+- **Tighter extraction prompt**, guided by the eval.
+- **A check of facts against git**, to flag facts about files that changed since.
