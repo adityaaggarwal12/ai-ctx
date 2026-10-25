@@ -344,19 +344,24 @@ export function adapterFor(path: string): Adapter | undefined {
   return undefined;
 }
 
-/** Scan all source roots and ingest anything that changed. */
-export function scanAll(opts: { onFile?: (path: string, n: number) => void; sinceDays?: number } = {}): { files: number; records: number } {
+interface Candidate {
+  path: string;
+  mtime: number;
+  adapter: Adapter;
+}
+
+/** Files under the source roots that changed since we last read them, oldest first per source. */
+function changedFiles(sinceDays?: number): Candidate[] {
   const cfg = loadConfig();
   const db = openDb();
   const known = new Map<string, { size: number; ino: number }>();
   for (const r of db.query("SELECT path, size, ino FROM files").all() as any[]) known.set(r.path, r);
-  const cutoff = opts.sinceDays ? Date.now() - opts.sinceDays * 86400_000 : 0;
-  let files = 0;
-  let records = 0;
+  const cutoff = sinceDays ? Date.now() - sinceDays * 86400_000 : 0;
+  const out: Candidate[] = [];
   for (const a of adapters) {
+    const mine: Candidate[] = [];
     for (const root of cfg.sources[a.source]) {
       if (!existsSync(root)) continue;
-      const candidates: { path: string; mtime: number }[] = [];
       for (const rel of new Glob("**/*.jsonl").scanSync({ cwd: root, onlyFiles: true })) {
         const path = join(root, rel);
         if (!a.accepts(path)) continue;
@@ -369,23 +374,44 @@ export function scanAll(opts: { onFile?: (path: string, n: number) => void; sinc
         if (st.mtimeMs < cutoff) continue;
         const k = known.get(path);
         if (k && k.size === st.size && k.ino === st.ino) continue;
-        candidates.push({ path, mtime: st.mtimeMs });
-      }
-      // oldest first so turn order and "latest" views come out right
-      candidates.sort((x, y) => x.mtime - y.mtime);
-      for (const c of candidates) {
-        try {
-          const n = ingestFile(c.path, a);
-          files++;
-          records += n;
-          opts.onFile?.(c.path, n);
-        } catch (e: any) {
-          logIngest(`ingest ${c.path} failed: ${e?.message ?? e}`);
-        }
+        mine.push({ path, mtime: st.mtimeMs, adapter: a });
       }
     }
+    // oldest first so turn order and "latest" views come out right
+    mine.sort((x, y) => x.mtime - y.mtime);
+    out.push(...mine);
   }
-  return { files, records };
+  return out;
+}
+
+function ingestCandidate(c: Candidate, opts: { onFile?: (path: string, n: number) => void }): number {
+  try {
+    const n = ingestFile(c.path, c.adapter);
+    opts.onFile?.(c.path, n);
+    return n;
+  } catch (e: any) {
+    logIngest(`ingest ${c.path} failed: ${e?.message ?? e}`);
+    return 0;
+  }
+}
+
+/** Scan all source roots and ingest anything that changed. */
+export function scanAll(opts: { onFile?: (path: string, n: number) => void; sinceDays?: number } = {}): { files: number; records: number } {
+  let records = 0;
+  const files = changedFiles(opts.sinceDays);
+  for (const c of files) records += ingestCandidate(c, opts);
+  return { files: files.length, records };
+}
+
+/** Same as scanAll, but yields to the event loop between files so the daemon keeps answering hooks. */
+export async function scanAllAsync(opts: { onFile?: (path: string, n: number) => void; sinceDays?: number } = {}): Promise<{ files: number; records: number }> {
+  let records = 0;
+  const files = changedFiles(opts.sinceDays);
+  for (const c of files) {
+    records += ingestCandidate(c, opts);
+    await new Promise((r) => setImmediate(r));
+  }
+  return { files: files.length, records };
 }
 
 /** Turns with no activity for a while are considered complete. */

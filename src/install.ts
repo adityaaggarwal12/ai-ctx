@@ -229,7 +229,8 @@ export function install(apply: boolean, kind: "install" | "uninstall" = "install
       const r = run(["systemctl", "--user", "enable", "--now", "ctxd.service"]);
       console.log(r.code === 0 ? "ctxd started (systemd --user ctxd)" : `systemctl: ${r.out.trim()}`);
     }
-    console.log("\nCodex: open /hooks once in Codex and approve the two ctx hooks (Codex skips unapproved hooks silently).");
+    const untrusted = codexTrust().filter((c) => !c.ok);
+    if (untrusted.length) console.log("\nCodex: open /hooks once in Codex and approve the two ctx hooks (Codex skips unapproved hooks silently).");
     console.log("Check with: ctx doctor");
   } else {
     if (mac) {

@@ -9,7 +9,7 @@ import { embedBacklog, embedQuery, embeddingsEnabled } from "./embed";
 import { extractPending } from "./extract";
 import { rebuildFacts } from "./facts";
 import { handleHook, type Harness, type HookEvent } from "./hooks";
-import { adapterFor, closeIdleTurns, ingestFile, scanAll, setIngestLogger } from "./ingest";
+import { adapterFor, closeIdleTurns, ingestFile, scanAllAsync, setIngestLogger } from "./ingest";
 import { projectBySlugOrId } from "./project";
 
 const started = Date.now();
@@ -75,8 +75,45 @@ export async function runDaemon() {
     if (n) log(`rebuilt facts from ${n} events`);
   }
 
+  // Listen first: hooks and doctor get answers even while a long backfill runs.
+  if (existsSync(paths.socket)) unlinkSync(paths.socket);
+  Bun.serve({
+    unix: paths.socket,
+    async fetch(req) {
+      const url = new URL(req.url);
+      try {
+        if (url.pathname === "/hook" && req.method === "POST") {
+          const { harness, event, input } = (await req.json()) as { harness: Harness; event: HookEvent; input: any };
+          // Make sure the very latest turns of every session are in before answering.
+          const ctx = await handleHook(harness, event, input, safeEmbed);
+          return Response.json({ context: ctx ?? null });
+        }
+        if (url.pathname === "/embed" && req.method === "POST") {
+          const { q } = (await req.json()) as { q: string };
+          const v = await safeEmbed(q, 5000);
+          return Response.json({ vec: v ? Array.from(v) : null });
+        }
+        if (url.pathname === "/extract" && req.method === "POST") {
+          await extractTick();
+          return Response.json({ ok: true });
+        }
+        if (url.pathname === "/status") {
+          return Response.json({ pid: process.pid, uptime: (Date.now() - started) / 1000, embedReady });
+        }
+        return new Response("not found", { status: 404 });
+      } catch (e: any) {
+        log(`request ${url.pathname} failed: ${e?.stack ?? e}`);
+        return Response.json({ error: String(e?.message ?? e) }, { status: 500 });
+      }
+    },
+  });
+  try {
+    chmodSync(paths.socket, 0o600);
+  } catch {}
+  log(`listening on ${paths.socket}`);
+
   const t0 = performance.now();
-  const r = scanAll();
+  const r = await scanAllAsync();
   log(`initial scan: ${r.files} files, ${r.records} records in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
   setMeta("last_scan", String(Date.now() / 1000));
 
@@ -112,8 +149,8 @@ export async function runDaemon() {
     }
   }
 
-  every(30_000, "rescan", () => {
-    scanAll();
+  every(30_000, "rescan", async () => {
+    await scanAllAsync();
     setMeta("last_scan", String(Date.now() / 1000));
   });
   every(15_000, "close-idle", () => closeIdleTurns(600));
@@ -152,41 +189,7 @@ export async function runDaemon() {
     });
   }
 
-  if (existsSync(paths.socket)) unlinkSync(paths.socket);
-  Bun.serve({
-    unix: paths.socket,
-    async fetch(req) {
-      const url = new URL(req.url);
-      try {
-        if (url.pathname === "/hook" && req.method === "POST") {
-          const { harness, event, input } = (await req.json()) as { harness: Harness; event: HookEvent; input: any };
-          // Make sure the very latest turns of every session are in before answering.
-          const ctx = await handleHook(harness, event, input, safeEmbed);
-          return Response.json({ context: ctx ?? null });
-        }
-        if (url.pathname === "/embed" && req.method === "POST") {
-          const { q } = (await req.json()) as { q: string };
-          const v = await safeEmbed(q, 5000);
-          return Response.json({ vec: v ? Array.from(v) : null });
-        }
-        if (url.pathname === "/extract" && req.method === "POST") {
-          await extractTick();
-          return Response.json({ ok: true });
-        }
-        if (url.pathname === "/status") {
-          return Response.json({ pid: process.pid, uptime: (Date.now() - started) / 1000, embedReady });
-        }
-        return new Response("not found", { status: 404 });
-      } catch (e: any) {
-        log(`request ${url.pathname} failed: ${e?.stack ?? e}`);
-        return Response.json({ error: String(e?.message ?? e) }, { status: 500 });
-      }
-    },
-  });
-  try {
-    chmodSync(paths.socket, 0o600);
-  } catch {}
-  log(`listening on ${paths.socket}`);
+
   extractTick();
 
   const stop = () => {

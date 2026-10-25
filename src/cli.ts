@@ -300,14 +300,22 @@ async function main() {
 
     case "doctor": {
       const checks = installedChecks();
-      const d = await callDaemon<any>("/status", undefined, 1000);
+      // Give a just-restarted daemon a few seconds to come up before calling it down.
+      let d = await callDaemon<any>("/status", undefined, 1000);
+      for (let i = 0; !d && i < 8; i++) {
+        await Bun.sleep(1000);
+        d = await callDaemon<any>("/status", undefined, 1000);
+      }
       checks.unshift({ ok: Boolean(d), name: "ctxd running", detail: d ? `pid ${d.pid}` : `not reachable at ${paths.socket}` });
       const claudeOk = Bun.spawnSync(["claude", "--version"], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
       checks.push({ ok: claudeOk, name: "claude CLI (extractor)", detail: claudeOk ? "found" : "not on PATH — extraction disabled" });
       const logFile = `${paths.logs}/ctxd.log`;
       if (existsSync(logFile)) {
-        const errs = readFileSync(logFile, "utf8").split("\n").slice(-200).filter((l) => /failed|error/i.test(l));
-        checks.push({ ok: errs.length === 0, name: "recent daemon errors", detail: errs.length ? errs.slice(-3).join(" | ") : "none" });
+        // Only errors since the daemon last started count as current problems.
+        const lines = readFileSync(logFile, "utf8").split("\n").slice(-2000);
+        const start = lines.findLastIndex((l) => l.includes("ctxd starting"));
+        const errs = lines.slice(Math.max(0, start)).filter((l) => /failed|error/i.test(l));
+        checks.push({ ok: errs.length === 0, name: "daemon errors since start", detail: errs.length ? errs.slice(-3).join(" | ") : "none" });
       }
       for (const c of checks) console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
       return;
