@@ -78,10 +78,20 @@ function ftsText(f: { type: string; text: string; why?: string | null; files?: s
   return `${f.type} ${f.text} ${f.why ?? ""} ${files.join(" ")}`;
 }
 
+/**
+ * When the fact was established: its source turn's time, not when extraction ran
+ * (a backfill would otherwise make old facts look fresh). Falls back to the event time.
+ */
+function establishedAt(e: FactEvent): number {
+  const tid = e.turns?.[e.turns.length - 1];
+  const row = tid ? (openDb().query("SELECT ts_start FROM turns WHERE id = ?").get(tid) as { ts_start: number } | null) : null;
+  return row?.ts_start && row.ts_start <= e.ts ? row.ts_start : e.ts;
+}
+
 /** Apply one event to the facts table (idempotent for add: same fact id is ignored). */
 export function reduce(e: FactEvent) {
   const db = openDb();
-  const now = e.ts;
+  const now = establishedAt(e);
   const insert = (status: Fact["status"] = "active") => {
     if (db.query("SELECT 1 FROM facts WHERE id = ?").get(e.fact)) return;
     db.query(
@@ -128,7 +138,7 @@ export function reduce(e: FactEvent) {
       db.query("UPDATE facts SET status = 'done', updated = ? WHERE id = ?").run(now, e.fact);
       break;
     case "reaffirm":
-      db.query("UPDATE facts SET updated = ?, confidence = MAX(confidence, ?) WHERE id = ?").run(now, Math.max(0, Math.min(1, e.confidence ?? 0)), e.fact);
+      db.query("UPDATE facts SET updated = MAX(updated, ?), confidence = MAX(confidence, ?) WHERE id = ?").run(now, Math.max(0, Math.min(1, e.confidence ?? 0)), e.fact);
       break;
   }
 }

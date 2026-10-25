@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { oneLine } from "./adapters/types";
-import { renderBrief, writeLive } from "./brief";
+import { AGING, renderBrief, writeLive } from "./brief";
 import { loadConfig, paths } from "./config";
 import { getMeta, openDb, usageToday } from "./db";
 import { callDaemon, daemonPid, runDaemon } from "./daemon";
@@ -82,7 +82,9 @@ Writing
   ctx note <text> [--type decision|gotcha|preference|progress] [--why reason]
   ctx reject <text> --why <reason>
   ctx todo <text>
-  ctx done <fact-id> | ctx retract <fact-id> [--why reason]
+  ctx done <fact-id…> | ctx retract <fact-id…> [--why reason]
+  ctx keep <fact-id…>                still true: confirm and refresh
+  ctx review [-p proj|--all] [--days 30]   old todos/gotchas and unconfirmed facts to clear out
 
 Admin
   ctx status | ctx doctor
@@ -266,14 +268,50 @@ async function main() {
     }
 
     case "done":
-    case "retract": {
-      const id = positional()[0];
-      const f = id && getFact(id);
-      if (!f) return console.error("usage: ctx " + cmd + " <fact-id>");
-      emit([{ op: cmd, fact: f.id, project: f.project, reason: opt("why") }]);
-      const p = projectBySlugOrId(f.project);
-      if (p) writeLive(p);
-      console.log(`${cmd === "done" ? "marked done" : "retracted"} [${f.id}] ${f.text}`);
+    case "retract":
+    case "keep": {
+      const ids = positional();
+      if (!ids.length) return console.error(`usage: ctx ${cmd} <fact-id…>`);
+      const touched = new Set<string>();
+      for (const id of ids) {
+        const f = getFact(id);
+        if (!f) {
+          console.error(`no such fact: ${id}`);
+          continue;
+        }
+        // keep = the user re-confirmed it: refresh its age and lift it to full confidence.
+        emit([cmd === "keep" ? { op: "reaffirm", fact: f.id, project: f.project, confidence: 1 } : { op: cmd, fact: f.id, project: f.project, reason: opt("why") }]);
+        touched.add(f.project);
+        console.log(`${{ done: "marked done", retract: "retracted", keep: "kept" }[cmd]} [${f.id}] ${f.text}`);
+      }
+      for (const id of touched) {
+        const p = projectBySlugOrId(id);
+        if (p) writeLive(p);
+      }
+      return;
+    }
+
+    case "review": {
+      const p = flag("all") ? undefined : currentProject();
+      const days = Number(opt("days") ?? loadConfig().brief.staleDays);
+      const cutoff = Date.now() / 1000 - days * 86400;
+      const scope = p ? `AND f.project IN ${inList(scopeIds(p.id))}` : "";
+      const rows = openDb()
+        .query(
+          `SELECT f.*, p.slug FROM facts f LEFT JOIN projects p ON p.id = f.project
+           WHERE f.status = 'active' AND f.updated < ? ${scope}
+             AND (f.type IN ${inList(AGING)} OR (f.origin = 'agent' AND f.confidence < 0.8))
+           ORDER BY p.slug, f.type, f.updated`,
+        )
+        .all(cutoff, ...(p ? scopeIds(p.id) : []), ...AGING) as any[];
+      if (!rows.length) return console.log(`nothing older than ${days} days to review${p ? ` in ${p.slug}` : ""}`);
+      let last = "";
+      for (const f of rows) {
+        if (!p && f.slug !== last) console.log(`\n${(last = f.slug)}`);
+        const unconfirmed = f.origin === "agent" && f.confidence < 0.8 ? ", unconfirmed" : "";
+        console.log(`[${f.id}] ${f.type.padEnd(10)} ${ago(f.updated).padEnd(8)} ${oneLine(f.text, 160)}  (${f.origin}${unconfirmed})`);
+      }
+      console.log(`\n${rows.length} to review. Clear with: ctx done <id…> · ctx retract <id…> · ctx keep <id…> (still true)`);
       return;
     }
 

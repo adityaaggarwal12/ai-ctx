@@ -6,6 +6,9 @@ import { openDb } from "./db";
 import { activeFacts, type Fact } from "./facts";
 import { inList, isMixed, scopeIds, type Project } from "./project";
 
+// Open items that silently go out of date when they are resolved somewhere extraction never saw.
+export const AGING: Fact["type"][] = ["todo", "gotcha"];
+
 const SECTIONS: { type: Fact["type"]; title: string; max: number }[] = [
   { type: "rejected", title: "Rejected — don't redo without asking", max: 12 },
   { type: "decision", title: "Decisions", max: 14 },
@@ -36,7 +39,8 @@ export interface BriefOpts {
 /** Ranked fact list for the brief: confirmed facts only, newest first within each type. */
 export function renderBrief(project: Project, opts: BriefOpts = {}): string {
   const db = openDb();
-  const maxChars = opts.maxChars ?? loadConfig().brief.maxChars;
+  const cfg = loadConfig().brief;
+  const maxChars = opts.maxChars ?? cfg.maxChars;
   const now = Date.now() / 1000;
   const facts = activeFacts(project.id).filter((f) => f.origin !== "agent" || f.confidence >= 0.8);
   // In a catch-all folder most facts are about some other task; only preferences apply everywhere.
@@ -64,10 +68,17 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
     if (mixed && sec.type !== "preference") continue;
     let items = facts.filter((f) => f.type === sec.type);
     if (sec.type === "progress") items = items.filter((f) => now - f.updated < 7 * 86400);
-    if (!items.length) continue;
+    let stale = 0;
+    if (AGING.includes(sec.type)) {
+      const fresh = items.filter((f) => now - f.updated < cfg.staleDays * 86400);
+      stale = items.length - fresh.length;
+      items = fresh;
+    }
+    if (!items.length && !stale) continue;
     out.push(`## ${sec.title}`);
     for (const f of items.slice(0, sec.max)) out.push(factLine(f));
     if (items.length > sec.max) out.push(`- …${items.length - sec.max} more: \`ctx facts --type ${sec.type}\``);
+    if (stale) out.push(`- …${stale} older than ${cfg.staleDays} days, possibly resolved: \`ctx review\``);
   }
 
   if (!out.length) return "";

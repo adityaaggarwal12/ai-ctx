@@ -129,4 +129,21 @@ describe("brief", () => {
     expect(renderBrief(p, { full: true })).toContain("wallet sweep");
     loadConfig().mixedProjects = [];
   });
+  test("facts are dated by their source turn, not by extraction time", () => {
+    const ts = Date.now() / 1000 - 12 * 86400;
+    openDb().query("INSERT INTO turns(id, session_id, idx, ts_start, ts_end, user, assistant, tools, complete) VALUES ('c:old:1', 'old', 1, ?, ?, 'u', 'a', '', 1)").run(ts, ts);
+    const id = newFactId();
+    emit([{ op: "add", fact: id, project: "dated", type: "decision", text: "Use pnpm", origin: "user", confidence: 1, turns: ["c:old:1"] }]);
+    expect(getFact(id)!.updated).toBeCloseTo(ts, 0);
+  });
+  test("stale todos leave the brief until kept", () => {
+    const old = newFactId();
+    emit([{ op: "add", fact: old, project: "aging", type: "todo", text: "Rotate the staging deploy key", origin: "user", confidence: 1 }]);
+    openDb().query("UPDATE facts SET updated = updated - 40 * 86400 WHERE id = ?").run(old);
+    const p = { id: "aging", slug: "aging" };
+    expect(renderBrief(p)).not.toContain("staging deploy key");
+    expect(renderBrief(p)).toContain("1 older than 30 days");
+    emit([{ op: "reaffirm", fact: old, project: "aging", confidence: 1 }]);
+    expect(renderBrief(p)).toContain("staging deploy key");
+  });
 });

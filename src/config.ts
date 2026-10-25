@@ -49,7 +49,8 @@ export interface Config {
   };
   /** horizonDays: only turns newer than this get vectors (older ones stay keyword-searchable). */
   embed: { enabled: boolean; model: string; dtype: string; horizonDays: number };
-  brief: { maxChars: number };
+  /** staleDays: todos and gotchas not confirmed for this long leave the brief (see `ctx review`). */
+  brief: { maxChars: number; staleDays: number };
   recall: { maxSnippets: number; maxChars: number; minSim: number };
 }
 
@@ -73,7 +74,7 @@ const defaults: Config = {
     horizonDays: 10,
   },
   embed: { enabled: true, model: "onnx-community/embeddinggemma-300m-ONNX", dtype: "q8", horizonDays: 90 },
-  brief: { maxChars: 6000 },
+  brief: { maxChars: 6000, staleDays: 30 },
   recall: { maxSnippets: 3, maxChars: 2500, minSim: 0.53 },
 };
 
