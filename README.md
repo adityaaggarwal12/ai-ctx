@@ -1,97 +1,184 @@
-# ctx — shared memory for your AI coding harnesses
+# ctx
 
-`ctx` gives every Claude Code and Codex session the context of the other sessions on
-the same project, whether they run in Orca, Conductor or a plain terminal. Sessions
-that are still open count too. Nothing has to end, nothing is uploaded, and no MCP
-connection is needed.
+**Shared memory for your AI coding agents.**
 
-- **Capture:** `ctxd` watches the transcript files the CLIs already write
-  (`~/.claude/projects`, `~/.codex/sessions`), turn by turn.
-- **Memory:** every few turns a cheap model (Haiku, through your `claude` CLI login)
-  records decisions, rejected options and why, gotchas, preferences, todos and
-  milestones. Most batches record nothing, by design.
-- **Recall:** new sessions get a short brief at start; prompts about past work get up
-  to 3 cited snippets, or nothing. Agents can dig deeper with `ctx search` and
-  `ctx show`.
+You run several Claude Code and Codex sessions on the same project, maybe in Orca, Conductor
+or a plain terminal. Each one starts blank. It doesn't know what the others decided, what you
+already rejected, or which trap cost you an hour yesterday.
 
-Background and design choices: [docs/RESEARCH.md](docs/RESEARCH.md),
-[docs/PLAN.md](docs/PLAN.md).
+`ctx` fixes that. It quietly reads the chat logs your agents already write, keeps a short
+memory of what matters, and hands that memory to every new session. It works with chats that
+are still open, so nothing has to finish first.
+
+- Runs locally. Your chats stay on your machine.
+- No MCP server and no plugin to install in each tool.
+- Costs a few cents a day, with a hard daily cap.
+
+```mermaid
+flowchart LR
+    A["Claude Code and Codex sessions<br/>(Orca, Conductor, terminal)"] -- "chat logs they already write" --> D["ctxd<br/>background daemon"]
+    D -- "short batches of turns" --> H["Haiku<br/>picks out what matters"]
+    H -- "decisions, rejections,<br/>gotchas, todos" --> M[("Local memory<br/>~/.ctx")]
+    M -- "brief at session start" --> N["Every new session"]
+    M -- "relevant notes per prompt" --> N
+```
+
+## What a new session sees
+
+When a session starts, the agent gets a short brief like this one:
+
+```text
+Shared memory for project my-app (github.com/you/my-app) from other agent sessions on this machine.
+## Other recent sessions on this project
+- conductor/codex · feature/billing · 12m ago · "Add Stripe checkout", last ask: "make the webhook idempotent"
+## Rejected (don't redo without asking)
+- [f3k9a2c] Do not add a Redis cache for the dashboard. Why: overkill for v1, an index fixed it (user · orca · 10-23)
+## Decisions
+- [f7q1x8d] Use SQLite, not Postgres. Why: single user, no server to run (agreed · cli · 10-22)
+## Gotchas
+- [fm2p4ve] Vitest 3 hangs on Node 26; keep Node 24 pinned in .nvmrc (agreed · codex · 10-24)
+## Open todos
+- [fz6t0rb] Add rate limiting to /signup (user · orca · 10-24)
+```
+
+Later in the chat, when you ask about something from the past, up to 3 matching notes are
+added to your prompt. If nothing matches well, nothing is added.
+
+## How it works
+
+1. **Capture.** A small daemon, `ctxd`, watches the chat logs that Claude Code
+   (`~/.claude/projects`) and Codex (`~/.codex/sessions`) write after every turn. It removes
+   secrets, then stores each turn: your message, the agent's reply, and a one-line summary of
+   each tool call.
+2. **Remember.** Every few turns, a cheap model (Haiku, through your own `claude` login) reads
+   the new turns and writes down only what should change how a future session acts. Most
+   batches produce nothing, by design.
+3. **Recall.** Hooks in Claude Code and Codex give each new session its brief and add
+   relevant notes to prompts. Agents can dig further with `ctx search` and `ctx show`.
+
+More detail, with diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why it is built
+this way: [docs/RESEARCH.md](docs/RESEARCH.md).
+
+## Requirements
+
+- macOS (launchd) or Linux (systemd user service)
+- [Bun](https://bun.sh) (tested with 1.4)
+- [Claude Code](https://code.claude.com) installed and logged in. It powers the memory step.
+- Codex is optional. If you use it, `ctx` reads its sessions too.
 
 ## Install
 
 ```sh
+git clone https://github.com/adityaaggarwal12/ai-ctx.git
+cd ai-ctx
 bun install
-bun src/cli.ts install          # dry run: shows every file it would touch
-bun src/cli.ts install --apply  # copies the app to ~/.ctx/app, adds hooks, starts ctxd (launchd)
+bun src/cli.ts install          # dry run: lists every file it would change
+bun src/cli.ts install --apply  # installs and starts the daemon
+ctx doctor                      # checks that everything is wired up
 ```
 
-Then, once, in Codex: open `/hooks` and approve the two `ctx` hooks (Codex silently
-skips hooks you haven't approved). Check everything with `ctx doctor`.
+`install --apply` does four things:
 
-Undo with `ctx uninstall --apply`. Every modified file gets a `.bak-ctx-<time>` backup.
+- copies the app to `~/.ctx/app` and puts a `ctx` command in `~/.local/bin`
+- adds two hooks to `~/.claude/settings.json` and `~/.codex/hooks.json`
+- adds a short note about `ctx` to `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`
+- starts `ctxd` as a background service
 
-## Use
+Every file it changes gets a backup next to it. To remove everything, run
+`ctx uninstall --apply`.
 
-| You want | Run |
+**Using Codex?** Open `/hooks` in Codex once and approve the two `ctx` hooks. Codex skips
+hooks you haven't approved, without any warning.
+
+**First run.** `ctxd` reads your existing chat history, which takes about a minute. It also
+downloads a small search model (about 300 MB) the first time it starts.
+
+## Everyday use
+
+| You want to | Run |
 |---|---|
-| What a new session sees | `ctx brief` |
-| Find a past discussion | `ctx search "refresh tokens"` (`--all` for every project) |
-| Expand an id from a brief or snippet | `ctx show f1a2b3c` / `ctx show t:1a2b3c4d.12` |
-| What's running elsewhere right now | `ctx sessions`, then `ctx tail <session>` |
-| Record something by hand | `ctx note "…" --why "…"`, `ctx reject "…" --why "…"`, `ctx todo "…"` |
-| Fix memory | `ctx retract <id>`, `ctx done <id>`, `ctx keep <id>`, `ctx review`, `ctx dedupe` |
-| Health | `ctx status`, `ctx doctor` |
+| See what a new session sees | `ctx brief` |
+| Find a past discussion | `ctx search "refresh tokens"` (add `--all` for every project) |
+| Open an id from a brief or note | `ctx show f1a2b3c` or `ctx show t:1a2b3c4d.12` |
+| See what other sessions are doing now | `ctx sessions`, then `ctx tail <session>` |
+| Save something by hand | `ctx note "..." --why "..."`, `ctx reject "..." --why "..."`, `ctx todo "..."` |
+| Fix memory | `ctx retract <id>`, `ctx done <id>`, `ctx keep <id>` |
+| Clean up | `ctx review` (old items), `ctx dedupe` (duplicates) |
+| Check health and cost | `ctx status`, `ctx doctor` |
 
-For a chat that was already open before you installed ctx, ask the agent to run
-`ctx brief` (hooks only attach to new sessions).
+Hooks only reach chats started after the install. In a chat that was already open, ask the
+agent to run `ctx brief`.
+
+## What is stored, and where
+
+Everything lives in `~/.ctx`, readable only by you.
+
+| Path | What it holds |
+|---|---|
+| `archive/<machine>/` | Cleaned copies of every turn. The source of truth, because Claude Code deletes old logs on its own. |
+| `events/<machine>/` | An append-only log of every memory change. `ctx rebuild` replays it. |
+| `index.sqlite` | Search index and the current list of facts. It can be rebuilt from the two folders above. |
+| `projects/<name>/LIVE.md` | A readable copy of each project's memory. |
+
+**Privacy.**
+
+- Secrets (API keys, tokens, passwords, private keys) are removed before anything is stored
+  or sent anywhere.
+- The only thing that leaves your machine is the memory step: short, cleaned batches of
+  turns sent to Haiku through your `claude` login.
+- Search runs on a local model. File contents and diffs are never stored or sent.
+
+## Cost
+
+Each memory call costs about $0.004 at list price. The default cap is 200 calls a day, so
+the most it can spend is about $0.80 a day. Typical use is far lower. `ctx status` shows
+today's calls and cost.
+
+New installs only process the last 10 days of history. To process older history once, run
+`ctx backfill --days 60`. Add `--dry-run` to see the cost first.
 
 ## Configuration
 
-`~/.ctx/config.json`:
+Settings live in `~/.ctx/config.json`. All are optional.
 
-- `branchScopedRepos`: repos where each branch is a separate project (for example a
-  playground repo with one idea per worktree):
-  `["github.com/you/playground"]`.
-- `mixedProjects`: project ids of catch-all folders where unrelated work happens side
-  by side (e.g. `["dir:/Users/you/dev/scratch"]`). Their brief lists only recent
-  sessions and preferences; topic facts arrive per prompt when relevant. `ctx brief
-  --all` and `LIVE.md` still show everything.
-- `ignoreCwd`: path fragments to never ingest.
-- `extract`: `model`, `maxCallsPerDay` (default 200), `horizonDays` (only recent
-  turns get extracted; older history stays searchable), `enabled`. To extract older
-  history once, `ctx backfill --days 60` (try `--dry-run` for a cost estimate); it runs
-  in the background within the daily cap, after any new chats.
-- `recall.minSim` (default 0.53): how similar a past note must be to a prompt before it
-  is added. Scores for every prompt are logged (ids and scores only) to
-  `logs/recall.jsonl`; `ctx recall-stats` shows where they fall and the near misses.
-- `brief.staleDays` (default 30): todos and gotchas not confirmed for this long drop out
-  of the brief; `ctx review` lists them to mark done, retract or keep.
-- `embed.enabled`: local EmbeddingGemma vectors for hybrid search (about 1.5 GB RAM
-  while backfilling; set `false` to run lexical-only).
+| Setting | Default | What it does |
+|---|---|---|
+| `extract.model` | `haiku` | Model used for the memory step |
+| `extract.maxCallsPerDay` | `200` | Daily cap on memory calls |
+| `extract.horizonDays` | `10` | Only turns this recent are processed. Older ones stay searchable. |
+| `brief.maxChars` | `6000` | Size limit for the session brief |
+| `brief.staleDays` | `30` | Todos and gotchas not confirmed for this long leave the brief. `ctx review` lists them. |
+| `recall.minSim` | `0.53` | How close a note must be to your prompt before it is added. `ctx recall-stats` helps tune it. |
+| `recall.maxSnippets` | `3` | Most notes added to one prompt |
+| `embed.enabled` | `true` | Local vector search. Set `false` to use keyword search only. |
+| `branchScopedRepos` | `[]` | Repos where each branch is its own project, such as a playground repo with one idea per branch |
+| `mixedProjects` | `[]` | Catch-all folders with unrelated work. Their brief shows only sessions and preferences; topic notes arrive per prompt. |
+| `projectAliases` | `{}` | Let a project also see the memory of older project ids, for example after moving a repo |
+| `ignoreCwd` | ctx's own folders | Path fragments whose sessions are never read |
 
-## Data
+## Limitations
 
-Everything lives in `~/.ctx` (mode 0700), with secrets redacted before anything is
-stored or sent to the model:
-
-- `archive/<machine>/…`: cleaned turns (source of truth; Claude Code deletes old
-  transcripts on its own schedule).
-- `events/<machine>/YYYY-MM.jsonl`: append-only fact log. `ctx rebuild` replays it.
-- `index.sqlite`: search index and derived tables (rebuildable).
-- `projects/<slug>/LIVE.md`: human-readable live brief.
-
-To sync with a VM, sync `archive/` and `events/` (each machine writes only its own
-subfolder) with Syncthing or rsync. Don't sync `index.sqlite`.
+- Laptop only for now. Syncing memory between machines is planned, not built.
+- Only Claude Code and Codex. Browser chats (ChatGPT, claude.ai) are out of scope.
+- The memory step sometimes saves more than it should. `bun run eval` measures this, and
+  `ctx review` and `ctx dedupe` clean it up.
 
 ## Development
 
 ```sh
-bun test
-bunx tsc --noEmit -p .
-CTX_HOME=/tmp/ctxtest bun src/cli.ts scan   # try it against a scratch store
+bun test                      # unit and integration tests
+bunx tsc --noEmit -p .        # type check
+bun run eval                  # memory quality check (about 15 Haiku calls, ~$0.01)
+CTX_HOME=/tmp/ctxtest bun src/cli.ts scan   # try it against a throwaway store
 ```
 
-Extraction quality: `bun run eval` runs the real extractor prompt over the labelled
-conversations in `eval/cases.json` and reports recall, unwanted facts and leaks (one
-Haiku call per case, about $0.01 a run). Run it before and after changing the prompt
-in `src/extract.ts`; `--runs 3` averages out model noise, `--case <name>` runs one.
+The daemon runs from the copy in `~/.ctx/app`. After changing code, run
+`bun src/cli.ts install --apply` again so the daemon picks it up.
+
+`bun run eval` sends 15 labelled conversations through the real memory prompt and reports
+what it found, what it missed, and what it saved by mistake. Run it before and after you
+change the prompt in `src/extract.ts`.
+
+## License
+
+[MIT](LICENSE)
