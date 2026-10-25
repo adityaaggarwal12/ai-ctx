@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
@@ -52,6 +52,8 @@ export interface Config {
   /** staleDays: todos and gotchas not confirmed for this long leave the brief (see `ctx review`). */
   brief: { maxChars: number; staleDays: number };
   recall: { maxSnippets: number; maxChars: number; minSim: number };
+  /** Local review page (`ctx ui`): off until first used, 127.0.0.1 only. */
+  ui: { enabled: boolean; port: number };
 }
 
 const defaults: Config = {
@@ -76,6 +78,7 @@ const defaults: Config = {
   embed: { enabled: true, model: "onnx-community/embeddinggemma-300m-ONNX", dtype: "q8", horizonDays: 90 },
   brief: { maxChars: 6000, staleDays: 30 },
   recall: { maxSnippets: 3, maxChars: 2500, minSim: 0.53 },
+  ui: { enabled: false, port: 7770 },
 };
 
 export function ensureDirs() {
@@ -106,6 +109,16 @@ export function loadConfig(): Config {
     embed: { ...defaults.embed, ...user.embed },
     brief: { ...defaults.brief, ...user.brief },
     recall: { ...defaults.recall, ...user.recall },
+    ui: { ...defaults.ui, ...user.ui },
   };
   return cached;
+}
+
+/** Change one top-level config section on disk (keeps the user's other settings) and drop the cache. */
+export function updateConfig<K extends keyof Config>(key: K, value: Partial<Config[K]>) {
+  const user = existsSync(paths.config) ? JSON.parse(readFileSync(paths.config, "utf8")) : {};
+  user[key] = typeof value === "object" && value !== null && !Array.isArray(value) ? { ...(user[key] ?? {}), ...value } : value;
+  writeFileSync(paths.config + ".tmp", JSON.stringify(user, null, 2) + "\n", { mode: 0o600 });
+  renameSync(paths.config + ".tmp", paths.config);
+  cached = undefined;
 }

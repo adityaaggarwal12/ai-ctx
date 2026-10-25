@@ -11,9 +11,11 @@ import { rebuildFacts } from "./facts";
 import { handleHook, type Harness, type HookEvent } from "./hooks";
 import { adapterFor, closeIdleTurns, compactArchive, ingestFile, scanAllAsync, setIngestLogger } from "./ingest";
 import { projectBySlugOrId } from "./project";
+import { serveUi } from "./ui-server";
 
 const started = Date.now();
 let embedReady = false;
+const daemonInfo = () => ({ pid: process.pid, uptime: (Date.now() - started) / 1000, embedReady });
 
 export function log(msg: string) {
   const line = `${new Date().toISOString()} ${msg}\n`;
@@ -98,7 +100,13 @@ export async function runDaemon() {
           return Response.json({ ok: true });
         }
         if (url.pathname === "/status") {
-          return Response.json({ pid: process.pid, uptime: (Date.now() - started) / 1000, embedReady });
+          return Response.json(daemonInfo());
+        }
+        if (url.pathname === "/ui" && req.method === "POST") {
+          const { port } = (await req.json()) as { port?: number };
+          const r = serveUi(daemonInfo, port);
+          log(`ui listening on http://127.0.0.1:${r.port}`);
+          return Response.json(r);
         }
         return new Response("not found", { status: 404 });
       } catch (e: any) {
@@ -111,6 +119,13 @@ export async function runDaemon() {
     chmodSync(paths.socket, 0o600);
   } catch {}
   log(`listening on ${paths.socket}`);
+  if (cfg.ui.enabled) {
+    try {
+      log(`ui listening on http://127.0.0.1:${serveUi(daemonInfo).port}`);
+    } catch (e: any) {
+      log(`ui failed to start: ${e?.message}`);
+    }
+  }
 
   const t0 = performance.now();
   const r = await scanAllAsync();

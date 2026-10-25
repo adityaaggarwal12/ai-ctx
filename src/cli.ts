@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { oneLine } from "./adapters/types";
 import { renderBrief, withWhy, writeLive } from "./brief";
-import { loadConfig, paths } from "./config";
+import { loadConfig, paths, updateConfig } from "./config";
 import { openDb, setMeta } from "./db";
 import { callDaemon, daemonPid, runDaemon } from "./daemon";
 import { estimateBacklog, extractPending, extractSince, pendingSessions } from "./extract";
@@ -10,6 +10,7 @@ import { formatHit, handleHook, hookOutput, projectForCwd, shortTurnId, type Har
 import { install } from "./install";
 import { addNote, applyFactAction, doctorChecks, duplicates, health, listFacts, listProjects, listSessions, mergeDuplicates, recallStats, reviewItems, sessionByPrefix, tailSession, type FactAction } from "./views";
 import { scanAll } from "./ingest";
+import { uiToken } from "./ui-server";
 import { projectBySlugOrId, type Project } from "./project";
 import { queryTerms, search } from "./search";
 
@@ -31,7 +32,7 @@ function positional(): string[] {
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("-")) {
-      if (!a.includes("=") && i + 1 < argv.length && !["--json", "--all", "--apply", "--dry-run", "--inactive", "--off"].includes(a)) i++;
+      if (!a.includes("=") && i + 1 < argv.length && !["--json", "--all", "--apply", "--dry-run", "--inactive", "--off", "--no-open"].includes(a)) i++;
       continue;
     }
     out.push(a);
@@ -84,6 +85,7 @@ Writing
 
 Admin
   ctx status | ctx doctor
+  ctx ui [--no-open] | ctx ui --off   local review page (127.0.0.1 only): projects, facts, sessions, health
   ctx recall-stats                   per-prompt recall scores vs recall.minSim (for re-tuning)
   ctx scan | ctx extract [--dry-run] | ctx rebuild
   ctx backfill --days 60 [--dry-run] | ctx backfill --off   extract older history within the daily cap
@@ -342,6 +344,23 @@ async function main() {
       return;
     }
 
+    case "ui": {
+      if (flag("off")) {
+        updateConfig("ui", { enabled: false });
+        return console.log("ui disabled; it stops listening the next time ctxd restarts (launchctl kickstart -k gui/$(id -u)/com.ctx.daemon)");
+      }
+      if (!loadConfig().ui.enabled) updateConfig("ui", { enabled: true });
+      const port = loadConfig().ui.port;
+      const r = await callDaemon<{ port: number }>("/ui", { port }, 3000);
+      if (!r) return console.error("ctxd isn't reachable, so the page can't be served. Check with: ctx doctor");
+      const url = `http://127.0.0.1:${r.port}/?t=${uiToken()}`;
+      if (flag("no-open")) return console.log(url);
+      const opener = process.platform === "darwin" ? "open" : "xdg-open";
+      const opened = Bun.spawnSync([opener, url], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+      console.log(opened ? `opened http://127.0.0.1:${r.port}` : `open this link in your browser: ${url}`);
+      return;
+    }
+
     case "doctor": {
       const checks = doctorChecks();
       // Give a just-restarted daemon a few seconds to come up before calling it down.
@@ -351,6 +370,11 @@ async function main() {
         d = await callDaemon<any>("/status", undefined, 1000);
       }
       checks.unshift({ ok: Boolean(d), name: "ctxd running", detail: d ? `pid ${d.pid}` : `not reachable at ${paths.socket}` });
+      const ui = loadConfig().ui;
+      if (ui.enabled) {
+        const up = await fetch(`http://127.0.0.1:${ui.port}/`, { signal: AbortSignal.timeout(1000) }).then((r) => r.ok, () => false);
+        checks.push({ ok: up, name: "ui page", detail: up ? `http://127.0.0.1:${ui.port} (open with ctx ui)` : `not answering on 127.0.0.1:${ui.port}; run ctx ui` });
+      }
       for (const c of checks) console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
       return;
     }
