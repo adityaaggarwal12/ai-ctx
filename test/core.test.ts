@@ -16,6 +16,8 @@ const { bestWindow } = await import("../src/hooks");
 const { openDb } = await import("../src/db");
 const { renderBrief } = await import("../src/brief");
 const { loadConfig } = await import("../src/config");
+const { findDuplicate, duplicatePairs } = await import("../src/dedupe");
+const { extractSession } = await import("../src/extract");
 
 describe("redact", () => {
   test("known token formats", () => {
@@ -145,5 +147,33 @@ describe("brief", () => {
     expect(renderBrief(p)).toContain("1 older than 30 days");
     emit([{ op: "reaffirm", fact: old, project: "aging", confidence: 1 }]);
     expect(renderBrief(p)).toContain("staging deploy key");
+  });
+});
+
+describe("dedupe", () => {
+  test("reworded copies match, distinct facts on one topic don't", () => {
+    emit([
+      { op: "add", fact: "fdup001", project: "dd", type: "gotcha", text: "Under vitest, happy-dom v20 no longer exposes localStorage, so tests that use it fail", origin: "agent", confidence: 0.6 },
+      { op: "add", fact: "fdup002", project: "dd", type: "preference", text: "For design work on Bolo, present numbered option lists and wait for the user to pick", origin: "user", confidence: 1 },
+    ]);
+    const facts = activeFacts("dd");
+    expect(findDuplicate("Under vitest in frontend tests, happy-dom v20 no longer exposes localStorage", "gotcha", facts)?.id).toBe("fdup001");
+    expect(findDuplicate("Under vitest in frontend tests, happy-dom v20 no longer exposes localStorage", "decision", facts)).toBeUndefined();
+    expect(findDuplicate("Before large changes to Bolo, present a step-by-step plan and wait for approval", "preference", facts)).toBeUndefined();
+  });
+  test("extraction turns a restated fact into a supersede that keeps the stronger origin", async () => {
+    const db = openDb();
+    const now = Date.now() / 1000;
+    db.query("INSERT INTO sessions(id, source, harness, machine, project, turns, skip) VALUES ('sx', 'claude', 'cli', 'm', 'dd2', 1, 0)").run();
+    db.query("INSERT INTO turns(id, session_id, project, idx, ts_start, ts_end, user, assistant, tools, complete) VALUES ('c:sx:1', 'sx', 'dd2', 1, ?, ?, 'deploy order?', 'core-be first', '', 1)").run(now, now);
+    emit([{ op: "add", fact: "fdup003", project: "dd2", type: "gotcha", text: "Deploy core-be before the frontend because the new OG card URL returns 404 until the backend is live", origin: "user", confidence: 0.9 }]);
+    const llm = async () => ({ cost: 0, ops: [{ op: "add" as const, type: "gotcha" as const, text: "Deploy firstfifty core-be before the frontend, because the new OG card URL returns 404 until the backend is live", origin: "agent" as const, confidence: 0.5, turn: 1 }] });
+    await extractSession("sx", "dd2", llm);
+    const [kept] = activeFacts("dd2");
+    expect(getFact("fdup003")?.status).toBe("superseded");
+    expect(kept.text).toContain("firstfifty");
+    expect(kept.origin).toBe("user");
+    expect(kept.confidence).toBe(0.9);
+    expect(duplicatePairs(activeFacts("dd2"))).toHaveLength(0);
   });
 });

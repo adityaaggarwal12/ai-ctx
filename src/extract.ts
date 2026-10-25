@@ -4,6 +4,7 @@ import { oneLine } from "./adapters/types";
 import { writeLive } from "./brief";
 import { loadConfig, paths } from "./config";
 import { bumpUsage, openDb, usageToday } from "./db";
+import { factWords, findDuplicate, similarity, strongerOrigin, DUP_SIM } from "./dedupe";
 import { activeFacts, emit, FACT_TYPES, newFactId, type Fact, type FactEvent } from "./facts";
 import { ftsBody } from "./ingest";
 import { inList, projectBySlugOrId, scopeIds } from "./project";
@@ -238,6 +239,8 @@ export async function extractSession(sessionId: string, project: string, llm: Ll
   }
 
   const known = new Set(existing.map((f) => f.id));
+  // The model only saw `existing`; check every active fact so reworded copies replace the original.
+  const everything = activeFacts(project);
   const session = db.query("SELECT harness FROM sessions WHERE id = ?").get(sessionId) as any;
   const events: Omit<FactEvent, "id" | "machine" | "ts">[] = [];
   for (const o of res.ops) {
@@ -246,6 +249,18 @@ export async function extractSession(sessionId: string, project: string, llm: Ll
     if (o.op === "add" || o.op === "supersede") {
       if (!o.text || !o.type || !FACT_TYPES.includes(o.type)) continue;
       if (o.op === "supersede" && (!o.target || !known.has(o.target))) o.op = "add";
+      // The same batch saying one thing twice keeps the first.
+      const words = factWords(o.text);
+      if (events.some((e) => e.type === o.type && e.text && similarity(words, factWords(e.text)) >= DUP_SIM)) continue;
+      if (o.op === "add") {
+        const dup = findDuplicate(o.text, o.type, everything.filter((f) => !events.some((e) => e.target === f.id)));
+        if (dup) {
+          o.op = "supersede";
+          o.target = dup.id;
+          o.origin = strongerOrigin(o.origin ?? "agent", dup.origin === "manual" ? "user" : dup.origin);
+          o.confidence = Math.max(o.confidence ?? 0.5, dup.confidence);
+        }
+      }
       events.push({
         ...base,
         op: o.op,

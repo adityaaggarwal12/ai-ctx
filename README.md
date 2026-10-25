@@ -39,7 +39,7 @@ Undo with `ctx uninstall --apply`. Every modified file gets a `.bak-ctx-<time>` 
 | Expand an id from a brief or snippet | `ctx show f1a2b3c` / `ctx show t:1a2b3c4d.12` |
 | What's running elsewhere right now | `ctx sessions`, then `ctx tail <session>` |
 | Record something by hand | `ctx note "…" --why "…"`, `ctx reject "…" --why "…"`, `ctx todo "…"` |
-| Fix memory | `ctx retract <id>`, `ctx done <id>`, `ctx keep <id>`, `ctx review` |
+| Fix memory | `ctx retract <id>`, `ctx done <id>`, `ctx keep <id>`, `ctx review`, `ctx dedupe` |
 | Health | `ctx status`, `ctx doctor` |
 
 For a chat that was already open before you installed ctx, ask the agent to run

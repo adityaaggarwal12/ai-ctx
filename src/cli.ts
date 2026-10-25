@@ -6,7 +6,8 @@ import { loadConfig, paths } from "./config";
 import { getMeta, openDb, usageToday } from "./db";
 import { callDaemon, daemonPid, runDaemon } from "./daemon";
 import { extractPending, pendingSessions } from "./extract";
-import { emit, getFact, newFactId, rebuildFacts, FACT_TYPES, type FactType } from "./facts";
+import { duplicatePairs } from "./dedupe";
+import { emit, getFact, newFactId, rebuildFacts, FACT_TYPES, type Fact, type FactType } from "./facts";
 import { formatHit, handleHook, hookOutput, projectForCwd, shortTurnId, type Harness, type HookEvent } from "./hooks";
 import { install, installedChecks } from "./install";
 import { scanAll } from "./ingest";
@@ -85,6 +86,7 @@ Writing
   ctx done <fact-id…> | ctx retract <fact-id…> [--why reason]
   ctx keep <fact-id…>                still true: confirm and refresh
   ctx review [-p proj|--all] [--days 30]   old todos/gotchas and unconfirmed facts to clear out
+  ctx dedupe [-p proj|--all] [--apply]     merge reworded duplicate facts (newest wording wins)
 
 Admin
   ctx status | ctx doctor
@@ -288,6 +290,30 @@ async function main() {
         const p = projectBySlugOrId(id);
         if (p) writeLive(p);
       }
+      return;
+    }
+
+    case "dedupe": {
+      const p = flag("all") ? undefined : currentProject();
+      const rows = openDb()
+        .query(`SELECT * FROM facts WHERE status = 'active' ${p ? `AND project IN ${inList(scopeIds(p.id))}` : ""}`)
+        .all(...(p ? scopeIds(p.id) : [])) as Fact[];
+      const pairs = duplicatePairs(rows);
+      if (!pairs.length) return console.log("no duplicates");
+      for (const { keep, drop } of pairs) console.log(`[${drop.id}] ${oneLine(drop.text, 150)}\n  → same as [${keep.id}] ${oneLine(keep.text, 150)}\n`);
+      if (!flag("apply")) return console.log(`${pairs.length} duplicates. Run with --apply to merge them into the newer fact.`);
+      const events: Parameters<typeof emit>[0] = [];
+      for (const { keep, drop } of pairs) {
+        // supersede with an existing fact id: the insert is a no-op, the older copy points at the kept one.
+        events.push({ op: "supersede", fact: keep.id, target: drop.id, project: drop.project, reason: "duplicate" });
+        if (drop.confidence > keep.confidence) events.push({ op: "reaffirm", fact: keep.id, project: keep.project, confidence: drop.confidence });
+      }
+      emit(events);
+      for (const id of new Set(pairs.map((x) => x.keep.project))) {
+        const proj = projectBySlugOrId(id);
+        if (proj) writeLive(proj);
+      }
+      console.log(`merged ${pairs.length} duplicates`);
       return;
     }
 
