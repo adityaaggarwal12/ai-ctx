@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { oneLine } from "./adapters/types";
-import { AGING, renderBrief, writeLive } from "./brief";
+import { AGING, renderBrief, withWhy, writeLive } from "./brief";
 import { loadConfig, paths } from "./config";
 import { getMeta, openDb, setMeta, usageToday } from "./db";
 import { callDaemon, daemonPid, runDaemon } from "./daemon";
@@ -68,7 +68,7 @@ function sessionByPrefix(prefix: string): any {
   return rows[0];
 }
 
-const HELP = `ctx — shared memory across Claude Code / Codex sessions (Orca, Conductor, terminal)
+const HELP = `ctx: shared memory across Claude Code and Codex sessions (Orca, Conductor, terminal)
 
 Reading
   ctx brief [-p project] [--all]    project brief (what new sessions get; --all: everything)
@@ -264,7 +264,7 @@ async function main() {
       const rows = openDb()
         .query(`SELECT * FROM facts WHERE project IN ${inList(scopeIds(p.id))} ${flag("inactive") ? "" : "AND status = 'active'"} ${type ? "AND type = ?" : ""} ORDER BY type, updated DESC`)
         .all(...([...scopeIds(p.id), type].filter(Boolean) as string[])) as any[];
-      for (const f of rows) console.log(`[${f.id}] ${f.type.padEnd(10)} ${f.status === "active" ? "" : `(${f.status}) `}${f.text}${f.why ? ` — ${f.why}` : ""}  (${f.origin} · ${f.harness ?? ""})`);
+      for (const f of rows) console.log(`[${f.id}] ${f.type.padEnd(10)} ${f.status === "active" ? "" : `(${f.status}) `}${withWhy(f.text, f.why)}  (${f.origin} · ${f.harness ?? ""})`);
       if (!rows.length) console.log("no facts");
       return;
     }
@@ -383,7 +383,7 @@ async function main() {
       const bf = getMeta("backfill_since");
       if (bf) {
         const left = estimateBacklog(Number(bf));
-        console.log(`backfill since ${new Date(Number(bf) * 1000).toISOString().slice(0, 10)}: ~${left.calls} calls left (${left.sessions} sessions)${left.calls ? "" : " — done; ctx backfill --off to clear"}`);
+        console.log(`backfill since ${new Date(Number(bf) * 1000).toISOString().slice(0, 10)}: ~${left.calls} calls left (${left.sessions} sessions)${left.calls ? "" : "; done, run ctx backfill --off to clear"}`);
       }
       const last = getMeta("last_scan");
       if (last) console.log(`last scan: ${ago(Number(last))}`);
@@ -407,7 +407,7 @@ async function main() {
       }
       const near = rows.flatMap((r) => r.hits.filter((h: any) => h.sim !== undefined && h.sim < minSim && h.sim >= minSim - 0.03)).slice(-8);
       if (near.length) {
-        console.log(`\nnear misses (just under the threshold) — if these look relevant, lower recall.minSim:`);
+        console.log(`\nnear misses (just under the threshold). If these look relevant, lower recall.minSim:`);
         for (const h of near) console.log(`  ${h.sim.toFixed(3)}  ctx show ${h.id}`);
       }
       return;
@@ -423,7 +423,7 @@ async function main() {
       }
       checks.unshift({ ok: Boolean(d), name: "ctxd running", detail: d ? `pid ${d.pid}` : `not reachable at ${paths.socket}` });
       const claudeOk = Bun.spawnSync(["claude", "--version"], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
-      checks.push({ ok: claudeOk, name: "claude CLI (extractor)", detail: claudeOk ? "found" : "not on PATH — extraction disabled" });
+      checks.push({ ok: claudeOk, name: "claude CLI (extractor)", detail: claudeOk ? "found" : "not on PATH, extraction disabled" });
       const logFile = `${paths.logs}/ctxd.log`;
       if (existsSync(logFile)) {
         // Only errors since the daemon last started count as current problems.

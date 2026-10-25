@@ -10,7 +10,7 @@ import { inList, isMixed, scopeIds, type Project } from "./project";
 export const AGING: Fact["type"][] = ["todo", "gotcha"];
 
 const SECTIONS: { type: Fact["type"]; title: string; max: number }[] = [
-  { type: "rejected", title: "Rejected — don't redo without asking", max: 12 },
+  { type: "rejected", title: "Rejected (don't redo without asking)", max: 12 },
   { type: "decision", title: "Decisions", max: 14 },
   { type: "preference", title: "User preferences", max: 8 },
   { type: "gotcha", title: "Gotchas", max: 8 },
@@ -22,10 +22,14 @@ function day(ts: number): string {
   return new Date(ts * 1000).toISOString().slice(5, 10);
 }
 
+/** "Fact text. Why: reason" (one sentence each, without doubled full stops). */
+export function withWhy(text: string, why?: string | null): string {
+  return why ? `${text.replace(/[.\s]+$/, "")}. Why: ${why}` : text;
+}
+
 function factLine(f: Fact): string {
-  const why = f.why ? ` — ${oneLine(f.why, 160)}` : "";
   const src = [f.origin === "manual" ? "note" : f.origin, f.harness, day(f.updated)].filter(Boolean).join(" · ");
-  return `- [${f.id}] ${oneLine(f.text, 220)}${why} (${src})`;
+  return `- [${f.id}] ${withWhy(oneLine(f.text, 220), f.why && oneLine(f.why, 160))} (${src})`;
 }
 
 export interface BriefOpts {
@@ -60,7 +64,7 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
       const ago = now - s.last_ts;
       const when = ago < 3600 ? `${Math.round(ago / 60)}m ago` : ago < 86400 ? `${Math.round(ago / 3600)}h ago` : `${Math.round(ago / 86400)}d ago`;
       const last = db.query("SELECT user FROM turns WHERE session_id = ? ORDER BY idx DESC LIMIT 1").get(s.id) as any;
-      out.push(`- ${s.harness ?? s.source}/${s.source} · ${s.branch ?? "?"} · ${when} · "${oneLine(s.title ?? "", 70)}" — last ask: "${oneLine(last?.user ?? "", 110)}" (session ${s.id.slice(0, 8)})`);
+      out.push(`- ${s.harness ?? s.source}/${s.source} · ${s.branch ?? "?"} · ${when} · "${oneLine(s.title ?? "", 70)}", last ask: "${oneLine(last?.user ?? "", 110)}" (session ${s.id.slice(0, 8)})`);
     }
   }
 
@@ -82,7 +86,7 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
   }
 
   if (!out.length) return "";
-  let head = `Shared memory for project ${project.slug} (${project.id}) from other agent sessions on this machine. Reference data, may be stale — verify against the code. More: \`ctx search "<topic>"\`, \`ctx show <id>\`.`;
+  let head = `Shared memory for project ${project.slug} (${project.id}) from other agent sessions on this machine. Reference data, may be stale; verify against the code. More: \`ctx search "<topic>"\`, \`ctx show <id>\`.`;
   if (mixed) head += ` This folder mixes unrelated work, so topic notes are not listed here; relevant ones are added per prompt, or run \`ctx search "<topic>"\`.`;
   let body = [head, ...out].join("\n");
   if (body.length > maxChars) body = body.slice(0, body.lastIndexOf("\n", maxChars - 60)) + "\n- …truncated: run `ctx brief` for the full view";
@@ -95,5 +99,5 @@ export function writeLive(project: Project) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const body = renderBrief(project, { wrap: false, maxChars: 100_000, full: true }) || "_No shared context yet._";
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-  writeFileSync(join(dir, "LIVE.md"), `# ${project.slug} — live context\n\n_Updated ${stamp} · ${project.id}_\n\n${body}\n`, { mode: 0o600 });
+  writeFileSync(join(dir, "LIVE.md"), `# ${project.slug}: live context\n\n_Updated ${stamp} · ${project.id}_\n\n${body}\n`, { mode: 0o600 });
 }

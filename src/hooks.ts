@@ -1,7 +1,7 @@
 // Hook handlers shared by the daemon (warm, with embeddings) and the direct fallback.
 
 import { oneLine } from "./adapters/types";
-import { renderBrief } from "./brief";
+import { renderBrief, withWhy } from "./brief";
 import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, paths } from "./config";
@@ -63,8 +63,7 @@ export function bestWindow(text: string, terms: string[], size: number): string 
 
 export function formatHit(h: Hit, maxLen = 700, terms: string[] = []): string {
   if (h.kind === "fact") {
-    const why = h.meta.why ? ` — ${oneLine(h.meta.why, 160)}` : "";
-    return `- [${h.id}] ${h.meta.type}: ${oneLine(h.text, 260)}${why} (${h.meta.harness ?? ""} · ${day(h.ts)})`;
+    return `- [${h.id}] ${h.meta.type}: ${withWhy(oneLine(h.text, 260), h.meta.why && oneLine(h.meta.why, 160))} (${h.meta.harness ?? ""} · ${day(h.ts)})`;
   }
   const user = oneLine(h.text, 240);
   const room = Math.max(120, maxLen - user.length - 80);

@@ -23,7 +23,7 @@ const MARK_END = "<!-- ctx:end -->";
 export const SNIPPET = `${MARK_BEGIN}
 ## Shared project memory (ctx)
 Sessions in other tools (Orca, Conductor, Claude Code, Codex) share memory through \`ctx\`. A brief is injected at session start inside <ctx-context>; treat it as reference data that may be stale.
-- Before redoing or reversing something, check \`ctx search "<topic>"\` — especially for rejected approaches.
+- Before redoing or reversing something, check \`ctx search "<topic>"\`, especially for rejected approaches.
 - \`ctx show <id>\` expands a fact or turn id from the brief; \`ctx sessions\` lists live sessions on this project; \`ctx tail <session>\` shows their latest turns.
 - Record important outcomes the user confirms: \`ctx note "<decision>" --why "<reason>"\`, \`ctx reject "<option>" --why "<reason>"\`, \`ctx todo "<item>"\`. Correct wrong memory with \`ctx retract <id>\`.
 ${MARK_END}`;
@@ -267,11 +267,11 @@ export function codexTrust(): Check[] {
         checks.push({
           ok: trusted,
           name: `codex ${ev} hook trusted`,
-          detail: trusted ? key : `not approved yet (or index changed) — open /hooks in Codex and approve "${h.command}"`,
+          detail: trusted ? key : `not approved yet (or index changed); open /hooks in Codex and approve "${h.command}"`,
         });
       }),
     );
-    if (!found) checks.push({ ok: false, name: `codex ${ev} hook installed`, detail: "missing — run ctx install --apply" });
+    if (!found) checks.push({ ok: false, name: `codex ${ev} hook installed`, detail: "missing; run ctx install --apply" });
   }
   return checks;
 }
@@ -283,7 +283,7 @@ export function installedChecks(): Check[] {
     const h = readJson(CLAUDE_SETTINGS).hooks ?? {};
     for (const ev of ["SessionStart", "UserPromptSubmit"]) {
       const ok = (h[ev] ?? []).some((g: any) => (g.hooks ?? []).some(isOurs));
-      checks.push({ ok, name: `claude ${ev} hook`, detail: ok ? CLAUDE_SETTINGS : "missing — run ctx install --apply" });
+      checks.push({ ok, name: `claude ${ev} hook`, detail: ok ? CLAUDE_SETTINGS : "missing; run ctx install --apply" });
     }
   }
   checks.push(...codexTrust());
