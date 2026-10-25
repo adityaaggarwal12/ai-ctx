@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, closeSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Glob } from "bun";
 import { claudeAdapter } from "./adapters/claude";
@@ -419,4 +419,39 @@ export function closeIdleTurns(idleSeconds = 600) {
   openDb()
     .query("UPDATE turns SET complete = 1 WHERE complete = 0 AND ts_end < ?")
     .run(Date.now() / 1000 - idleSeconds);
+}
+
+/**
+ * A turn is re-archived whenever it changes, so files collect stale copies. Keep only the
+ * latest line per turn id (in its latest position). Synchronous on purpose: run it in the
+ * daemon, the archive's only writer, so no append can land mid-rewrite.
+ */
+export function compactArchive(root = join(paths.archive, loadConfig().machine)): { files: number; dropped: number } {
+  let files = 0;
+  let dropped = 0;
+  if (!existsSync(root)) return { files, dropped };
+  for (const source of readdirSync(root)) {
+    const dir = join(root, source);
+    if (!statSync(dir).isDirectory()) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      const file = join(dir, name);
+      const lines = readFileSync(file, "utf8").split("\n").filter((l) => l.trim());
+      const last = new Map<string, number>();
+      lines.forEach((l, i) => {
+        try {
+          last.set(JSON.parse(l).id, i);
+        } catch {
+          last.set(`bad:${i}`, i); // keep unparseable lines rather than lose data
+        }
+      });
+      if (last.size === lines.length) continue;
+      const keep = [...last.values()].sort((a, b) => a - b).map((i) => lines[i]);
+      writeFileSync(file + ".tmp", keep.join("\n") + "\n", { mode: 0o600 });
+      renameSync(file + ".tmp", file);
+      files++;
+      dropped += lines.length - keep.length;
+    }
+  }
+  return { files, dropped };
 }

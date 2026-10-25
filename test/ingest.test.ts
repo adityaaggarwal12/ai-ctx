@@ -10,7 +10,7 @@ mkdirSync(join(claudeRoot, "proj"), { recursive: true });
 mkdirSync(process.env.CTX_HOME, { recursive: true });
 writeFileSync(join(process.env.CTX_HOME, "config.json"), JSON.stringify({ sources: { claude: [claudeRoot], codex: [join(home, "codex")] }, ignoreCwd: [] }));
 
-const { scanAll, ingestFile, adapterFor } = await import("../src/ingest");
+const { scanAll, ingestFile, adapterFor, compactArchive } = await import("../src/ingest");
 const { openDb } = await import("../src/db");
 const { redact } = await import("../src/redact");
 
@@ -83,5 +83,17 @@ describe("ingest", () => {
     expect(stored).not.toContain("sk-ant-api03");
     expect(redact("const authHeader = req.headers.authorization")).toBe("const authHeader = req.headers.authorization");
     expect(redact("DB_PASS=hunter22x")).toBe("DB_PASS=[REDACTED:kv]");
+  });
+});
+
+describe("archive", () => {
+  test("compaction keeps the latest copy of each turn and nothing else changes", () => {
+    const dir = join(home, "arch", "claude");
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, "s9.jsonl");
+    writeFileSync(f, [{ id: "a", v: 1 }, { id: "b", v: 1 }, { id: "a", v: 2 }].map((x) => JSON.stringify(x)).join("\n") + "\nnot json\n");
+    expect(compactArchive(join(home, "arch"))).toEqual({ files: 1, dropped: 1 });
+    expect(readFileSync(f, "utf8")).toBe('{"id":"b","v":1}\n{"id":"a","v":2}\nnot json\n');
+    expect(compactArchive(join(home, "arch"))).toEqual({ files: 0, dropped: 0 });
   });
 });

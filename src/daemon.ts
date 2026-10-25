@@ -9,7 +9,7 @@ import { embedBacklog, embedQuery, embeddingsEnabled } from "./embed";
 import { extractPending } from "./extract";
 import { rebuildFacts } from "./facts";
 import { handleHook, type Harness, type HookEvent } from "./hooks";
-import { adapterFor, closeIdleTurns, ingestFile, scanAllAsync, setIngestLogger } from "./ingest";
+import { adapterFor, closeIdleTurns, compactArchive, ingestFile, scanAllAsync, setIngestLogger } from "./ingest";
 import { projectBySlugOrId } from "./project";
 
 const started = Date.now();
@@ -160,6 +160,12 @@ export async function runDaemon() {
       log: (r) => log(`extract ${r.session.slice(0, 8)}: ${r.turns} turns → ${r.ops} ops${r.skipped ? ` (${r.skipped})` : ""}${r.cost ? ` $${r.cost.toFixed(4)}` : ""}`),
     });
   });
+  every(3600_000, "compact", () => {
+    if (Date.now() / 1000 - Number(getMeta("last_compact") ?? 0) < 86400) return;
+    const r = compactArchive();
+    setMeta("last_compact", String(Date.now() / 1000));
+    if (r.dropped) log(`archive compacted: ${r.dropped} stale turn copies dropped from ${r.files} files`);
+  });
   every(5 * 60_000, "live", () => {
     const rows = db.query("SELECT DISTINCT project FROM sessions WHERE last_ts > ? AND project IS NOT NULL").all(Date.now() / 1000 - 86400) as any[];
     for (const r of rows) {
@@ -202,7 +208,6 @@ export async function runDaemon() {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  void getMeta;
 }
 
 /** Ask the running daemon. Returns undefined if it isn't reachable in time. */
