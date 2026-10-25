@@ -8,7 +8,7 @@ import { callDaemon, daemonPid, runDaemon } from "./daemon";
 import { estimateBacklog, extractPending, extractSince, pendingSessions } from "./extract";
 import { duplicatePairs } from "./dedupe";
 import { emit, getFact, newFactId, rebuildFacts, FACT_TYPES, type Fact, type FactType } from "./facts";
-import { formatHit, handleHook, hookOutput, projectForCwd, shortTurnId, type Harness, type HookEvent } from "./hooks";
+import { formatHit, handleHook, hookOutput, projectForCwd, RECALL_LOG, shortTurnId, type Harness, type HookEvent } from "./hooks";
 import { install, installedChecks } from "./install";
 import { scanAll } from "./ingest";
 import { inList, projectBySlugOrId, scopeIds, type Project } from "./project";
@@ -90,6 +90,7 @@ Writing
 
 Admin
   ctx status | ctx doctor
+  ctx recall-stats                   per-prompt recall scores vs recall.minSim (for re-tuning)
   ctx scan | ctx extract [--dry-run] | ctx rebuild
   ctx backfill --days 60 [--dry-run] | ctx backfill --off   extract older history within the daily cap
   ctx install [--apply] | ctx uninstall [--apply]
@@ -387,6 +388,28 @@ async function main() {
       const last = getMeta("last_scan");
       if (last) console.log(`last scan: ${ago(Number(last))}`);
       if (existsSync(paths.db)) console.log(`index: ${(statSync(paths.db).size / 1e6).toFixed(1)} MB at ${paths.db}`);
+      return;
+    }
+
+    case "recall-stats": {
+      const minSim = loadConfig().recall.minSim;
+      const lines = [RECALL_LOG() + ".1", RECALL_LOG()].filter(existsSync).flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean));
+      const rows = lines.map((l) => JSON.parse(l)).filter((r) => r.vec);
+      if (!rows.length) return console.log("no recall data yet (logged per prompt once embeddings are ready)");
+      const top = rows.map((r) => Math.max(0, ...r.hits.map((h: any) => h.sim ?? 0)));
+      const injected = rows.filter((r) => r.hits.some((h: any) => h.used)).length;
+      console.log(`${rows.length} prompts searched with vectors, ${injected} got notes (${((injected / rows.length) * 100).toFixed(0)}%); recall.minSim = ${minSim}`);
+      console.log("best match per prompt:");
+      for (let lo = 0.4; lo < 0.72; lo += 0.02) {
+        const n = top.filter((t) => t >= lo && t < lo + 0.02).length;
+        const mark = minSim >= lo && minSim < lo + 0.02 ? "  ← threshold" : "";
+        if (n || mark) console.log(`  ${lo.toFixed(2)}–${(lo + 0.02).toFixed(2)} ${"█".repeat(Math.ceil((n / rows.length) * 50))} ${n}${mark}`);
+      }
+      const near = rows.flatMap((r) => r.hits.filter((h: any) => h.sim !== undefined && h.sim < minSim && h.sim >= minSim - 0.03)).slice(-8);
+      if (near.length) {
+        console.log(`\nnear misses (just under the threshold) — if these look relevant, lower recall.minSim:`);
+        for (const h of near) console.log(`  ${h.sim.toFixed(3)}  ctx show ${h.id}`);
+      }
       return;
     }
 

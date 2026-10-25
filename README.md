@@ -61,6 +61,9 @@ For a chat that was already open before you installed ctx, ask the agent to run
   turns get extracted; older history stays searchable), `enabled`. To extract older
   history once, `ctx backfill --days 60` (try `--dry-run` for a cost estimate); it runs
   in the background within the daily cap, after any new chats.
+- `recall.minSim` (default 0.53): how similar a past note must be to a prompt before it
+  is added. Scores for every prompt are logged (ids and scores only) to
+  `logs/recall.jsonl`; `ctx recall-stats` shows where they fall and the near misses.
 - `brief.staleDays` (default 30): todos and gotchas not confirmed for this long drop out
   of the brief; `ctx review` lists them to mark done, retract or keep.
 - `embed.enabled`: local EmbeddingGemma vectors for hybrid search (about 1.5 GB RAM

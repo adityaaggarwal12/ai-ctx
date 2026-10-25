@@ -2,7 +2,9 @@
 
 import { oneLine } from "./adapters/types";
 import { renderBrief } from "./brief";
-import { loadConfig } from "./config";
+import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { loadConfig, paths } from "./config";
 import { openDb } from "./db";
 import { isMixed, projectBySlugOrId, resolveProject, scopeProject, type Project } from "./project";
 import { confident, queryTerms, search, type Hit } from "./search";
@@ -77,6 +79,22 @@ function mentionedProjects(prompt: string, current?: string): Project[] {
   return rows.filter((p) => p.id !== current && p.slug.length >= 5 && words.has(p.slug.toLowerCase()));
 }
 
+export const RECALL_LOG = () => join(paths.logs, "recall.jsonl");
+
+/**
+ * One line per searched prompt: candidate scores and which were injected, never the prompt
+ * itself. `ctx recall-stats` reads it to re-tune recall.minSim as the store grows.
+ */
+function logRecall(project: string | undefined, terms: number, vec: boolean, scored: Hit[], picked: Hit[]) {
+  try {
+    const file = RECALL_LOG();
+    if (existsSync(file) && statSync(file).size > 5e6) renameSync(file, file + ".1");
+    const round = (n: number | undefined) => (n === undefined ? undefined : Math.round(n * 1000) / 1000);
+    const hits = scored.map((h) => ({ id: h.kind === "turn" ? shortTurnId(h.id, h.meta.idx) : h.id, kind: h.kind, sim: round(h.sim), cov: round(h.coverage), lex: h.lexRank, used: picked.includes(h) || undefined }));
+    appendFileSync(file, JSON.stringify({ ts: Math.round(Date.now() / 1000), project, terms, vec, hits }) + "\n", { mode: 0o600 });
+  } catch {} // logging must never break a hook
+}
+
 export async function handleHook(
   harness: Harness,
   event: HookEvent,
@@ -106,15 +124,18 @@ export async function handleHook(
   const scopes = [project, ...mentionedProjects(prompt, project?.id)].filter(Boolean) as Project[];
   if (!scopes.length) return undefined;
   const picked: Hit[] = [];
+  const scored: Hit[] = [];
   for (const p of scopes) {
     const hits = search(prompt, { project: p.id, excludeSession: input.session_id, qvec, limit: 8 });
     for (const h of hits) {
+      scored.push(h);
       if (!confident(h, Boolean(qvec), terms.length, cfg.minSim)) continue;
       // Facts that existed when this session started were already in its brief (mixed projects' briefs omit them).
       if (h.kind === "fact" && p.id === project?.id && h.ts < sessionStart && !isMixed(p.id)) continue;
       picked.push(h);
     }
   }
+  logRecall(project?.id, terms.length, Boolean(qvec), scored, picked);
   if (!picked.length) return undefined;
   picked.sort((a, b) => b.score - a.score);
 

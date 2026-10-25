@@ -12,7 +12,7 @@ const { codexAdapter } = await import("../src/adapters/codex");
 const { stripInjected } = await import("../src/adapters/types");
 const { emit, activeFacts, getFact, rebuildFacts, newFactId } = await import("../src/facts");
 const { search, queryTerms, confident } = await import("../src/search");
-const { bestWindow } = await import("../src/hooks");
+const { bestWindow, handleHook, RECALL_LOG } = await import("../src/hooks");
 const { openDb } = await import("../src/db");
 const { renderBrief } = await import("../src/brief");
 const { loadConfig } = await import("../src/config");
@@ -186,5 +186,24 @@ describe("backfill", () => {
     setMeta("backfill_since", String(now - 60 * 86400));
     expect(extractSince(now)).toBeCloseTo(now - 60 * 86400, 0);
     openDb().query("DELETE FROM meta WHERE k = 'backfill_since'").run();
+  });
+});
+
+describe("recall log", () => {
+  test("records candidate scores without the prompt", async () => {
+    emit([{ op: "add", fact: newFactId(), project: "dir:/tmp/recall-proj", type: "rejected", text: "Kafka queue for webhook delivery", why: "too heavy", origin: "user", confidence: 1 }]);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync("/tmp/recall-proj", { recursive: true });
+    const { resolveProject } = await import("../src/project");
+    const p = resolveProject("/tmp/recall-proj")!;
+    openDb().query("UPDATE facts SET project = ? WHERE project = 'dir:/tmp/recall-proj'").run(p.id);
+    const prompt = "should we put a kafka queue in front of webhook delivery";
+    // A session that started before the fact existed, so the fact wasn't in its brief.
+    openDb().query("INSERT INTO sessions(id, source, machine, started, turns, skip) VALUES ('rs1', 'claude', 'm', ?, 0, 0)").run(Date.now() / 1000 - 60);
+    const out = await handleHook("claude", "prompt", { cwd: "/tmp/recall-proj", prompt, session_id: "rs1" });
+    expect(out).toContain("Kafka");
+    const log = (await Bun.file(RECALL_LOG()).text()).trim().split("\n").pop()!;
+    expect(log).not.toContain("webhook delivery");
+    expect(JSON.parse(log).hits.some((h: any) => h.used)).toBe(true);
   });
 });
