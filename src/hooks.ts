@@ -4,7 +4,7 @@ import { oneLine } from "./adapters/types";
 import { renderBrief } from "./brief";
 import { loadConfig } from "./config";
 import { openDb } from "./db";
-import { projectBySlugOrId, resolveProject, scopeProject, type Project } from "./project";
+import { isMixed, projectBySlugOrId, resolveProject, scopeProject, type Project } from "./project";
 import { confident, queryTerms, search, type Hit } from "./search";
 
 export type Harness = "claude" | "codex";
@@ -110,8 +110,8 @@ export async function handleHook(
     const hits = search(prompt, { project: p.id, excludeSession: input.session_id, qvec, limit: 8 });
     for (const h of hits) {
       if (!confident(h, Boolean(qvec), terms.length, cfg.minSim)) continue;
-      // Facts that existed when this session started were already in its brief.
-      if (h.kind === "fact" && p.id === project?.id && h.ts < sessionStart) continue;
+      // Facts that existed when this session started were already in its brief (mixed projects' briefs omit them).
+      if (h.kind === "fact" && p.id === project?.id && h.ts < sessionStart && !isMixed(p.id)) continue;
       picked.push(h);
     }
   }

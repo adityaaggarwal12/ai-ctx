@@ -29,6 +29,12 @@ export interface Config {
    * (e.g. a repo that started life as a branch of another repo).
    */
   projectAliases: Record<string, string[]>;
+  /**
+   * Project ids of catch-all folders where unrelated work happens side by side (e.g. a
+   * scratch dir you launch agents from). Their brief carries no topical facts; relevant
+   * notes arrive per prompt instead.
+   */
+  mixedProjects: string[];
   /** Sessions whose cwd contains any of these substrings are ignored. */
   ignoreCwd: string[];
   extract: {
@@ -55,6 +61,7 @@ const defaults: Config = {
   },
   branchScopedRepos: [],
   projectAliases: {},
+  mixedProjects: [],
   ignoreCwd: ["/Library/Application Support/Claude/scratch-workspaces/", "/.ctx/"],
   extract: {
     enabled: true,

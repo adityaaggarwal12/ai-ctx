@@ -52,6 +52,10 @@ For a chat that was already open before you installed ctx, ask the agent to run
 - `branchScopedRepos`: repos where each branch is a separate project (for example a
   playground repo with one idea per worktree):
   `["github.com/you/playground"]`.
+- `mixedProjects`: project ids of catch-all folders where unrelated work happens side
+  by side (e.g. `["dir:/Users/you/dev/scratch"]`). Their brief lists only recent
+  sessions and preferences; topic facts arrive per prompt when relevant. `ctx brief
+  --all` and `LIVE.md` still show everything.
 - `ignoreCwd`: path fragments to never ingest.
 - `extract`: `model`, `maxCallsPerDay` (default 200), `horizonDays` (only recent
   turns get extracted; older history stays searchable), `enabled`.

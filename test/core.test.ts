@@ -14,6 +14,8 @@ const { emit, activeFacts, getFact, rebuildFacts, newFactId } = await import("..
 const { search, queryTerms, confident } = await import("../src/search");
 const { bestWindow } = await import("../src/hooks");
 const { openDb } = await import("../src/db");
+const { renderBrief } = await import("../src/brief");
+const { loadConfig } = await import("../src/config");
 
 describe("redact", () => {
   test("known token formats", () => {
@@ -109,5 +111,22 @@ describe("search", () => {
   test("best window picks the matching region", () => {
     const text = "intro ".repeat(200) + "the redis cache decision was rejected" + " outro".repeat(200);
     expect(bestWindow(text, ["redis", "cache"], 120)).toContain("redis cache");
+  });
+});
+
+describe("brief", () => {
+  test("mixed-topic projects list preferences only, unless full", () => {
+    emit([
+      { op: "add", fact: newFactId(), project: "mix", type: "decision", text: "Ship the wallet sweep script", origin: "user", confidence: 1 },
+      { op: "add", fact: newFactId(), project: "mix", type: "preference", text: "Answer with short checklists", origin: "user", confidence: 1 },
+    ]);
+    const p = { id: "mix", slug: "mix" };
+    expect(renderBrief(p)).toContain("wallet sweep");
+    loadConfig().mixedProjects = ["mix"];
+    const brief = renderBrief(p);
+    expect(brief).toContain("short checklists");
+    expect(brief).not.toContain("wallet sweep");
+    expect(renderBrief(p, { full: true })).toContain("wallet sweep");
+    loadConfig().mixedProjects = [];
   });
 });

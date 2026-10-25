@@ -4,7 +4,7 @@ import { oneLine } from "./adapters/types";
 import { loadConfig, paths } from "./config";
 import { openDb } from "./db";
 import { activeFacts, type Fact } from "./facts";
-import { inList, scopeIds, type Project } from "./project";
+import { inList, isMixed, scopeIds, type Project } from "./project";
 
 const SECTIONS: { type: Fact["type"]; title: string; max: number }[] = [
   { type: "rejected", title: "Rejected — don't redo without asking", max: 12 },
@@ -29,6 +29,8 @@ export interface BriefOpts {
   excludeSession?: string;
   maxChars?: number;
   wrap?: boolean;
+  /** Every section even for mixed-topic projects (LIVE.md, `ctx brief --all`). */
+  full?: boolean;
 }
 
 /** Ranked fact list for the brief: confirmed facts only, newest first within each type. */
@@ -37,6 +39,8 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
   const maxChars = opts.maxChars ?? loadConfig().brief.maxChars;
   const now = Date.now() / 1000;
   const facts = activeFacts(project.id).filter((f) => f.origin !== "agent" || f.confidence >= 0.8);
+  // In a catch-all folder most facts are about some other task; only preferences apply everywhere.
+  const mixed = !opts.full && isMixed(project.id);
   const out: string[] = [];
 
   const sessions = db
@@ -57,6 +61,7 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
   }
 
   for (const sec of SECTIONS) {
+    if (mixed && sec.type !== "preference") continue;
     let items = facts.filter((f) => f.type === sec.type);
     if (sec.type === "progress") items = items.filter((f) => now - f.updated < 7 * 86400);
     if (!items.length) continue;
@@ -66,7 +71,8 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
   }
 
   if (!out.length) return "";
-  const head = `Shared memory for project ${project.slug} (${project.id}) from other agent sessions on this machine. Reference data, may be stale — verify against the code. More: \`ctx search "<topic>"\`, \`ctx show <id>\`.`;
+  let head = `Shared memory for project ${project.slug} (${project.id}) from other agent sessions on this machine. Reference data, may be stale — verify against the code. More: \`ctx search "<topic>"\`, \`ctx show <id>\`.`;
+  if (mixed) head += ` This folder mixes unrelated work, so topic notes are not listed here; relevant ones are added per prompt, or run \`ctx search "<topic>"\`.`;
   let body = [head, ...out].join("\n");
   if (body.length > maxChars) body = body.slice(0, body.lastIndexOf("\n", maxChars - 60)) + "\n- …truncated: run `ctx brief` for the full view";
   return opts.wrap === false ? body : `<ctx-context project="${project.id}" kind="brief">\n${body}\n</ctx-context>`;
@@ -76,7 +82,7 @@ export function renderBrief(project: Project, opts: BriefOpts = {}): string {
 export function writeLive(project: Project) {
   const dir = join(paths.projects, project.slug);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const body = renderBrief(project, { wrap: false, maxChars: 100_000 }) || "_No shared context yet._";
+  const body = renderBrief(project, { wrap: false, maxChars: 100_000, full: true }) || "_No shared context yet._";
   const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
   writeFileSync(join(dir, "LIVE.md"), `# ${project.slug} — live context\n\n_Updated ${stamp} · ${project.id}_\n\n${body}\n`, { mode: 0o600 });
 }

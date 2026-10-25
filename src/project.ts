@@ -143,6 +143,11 @@ export function scopeIds(id: string): string[] {
   return [id, ...(aliases[id] ?? []).filter((a) => a !== id)];
 }
 
+/** A catch-all folder whose facts span unrelated topics (see Config.mixedProjects). */
+export function isMixed(id: string): boolean {
+  return (loadConfig().mixedProjects ?? []).includes(id);
+}
+
 export function inList(ids: string[]): string {
   return `(${ids.map(() => "?").join(",")})`;
 }

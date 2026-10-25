@@ -70,7 +70,7 @@ function sessionByPrefix(prefix: string): any {
 const HELP = `ctx — shared memory across Claude Code / Codex sessions (Orca, Conductor, terminal)
 
 Reading
-  ctx brief [-p project]            project brief (what new sessions get)
+  ctx brief [-p project] [--all]    project brief (what new sessions get; --all: everything)
   ctx search <query> [-p proj|--all] [--type decision|rejected|…] [--since 7d] [-n 10] [--json]
   ctx show <id>                      fact (f…) or turn (t:session.idx) with neighbours
   ctx sessions [-p proj|--all]       recent sessions (any harness)
@@ -148,7 +148,7 @@ async function main() {
     case "brief": {
       const p = currentProject()!;
       writeLive(p);
-      console.log(renderBrief(p, { wrap: false, maxChars: flag("all") ? 100_000 : undefined }) || `No shared context yet for ${p.slug}.`);
+      console.log(renderBrief(p, { wrap: false, maxChars: flag("all") ? 100_000 : undefined, full: flag("all") }) || `No shared context yet for ${p.slug}.`);
       return;
     }
 
