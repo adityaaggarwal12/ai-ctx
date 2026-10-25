@@ -1,17 +1,16 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, statSync } from "node:fs";
 import { oneLine } from "./adapters/types";
-import { AGING, renderBrief, withWhy, writeLive } from "./brief";
+import { renderBrief, withWhy, writeLive } from "./brief";
 import { loadConfig, paths } from "./config";
-import { getMeta, openDb, setMeta, usageToday } from "./db";
+import { openDb, setMeta } from "./db";
 import { callDaemon, daemonPid, runDaemon } from "./daemon";
 import { estimateBacklog, extractPending, extractSince, pendingSessions } from "./extract";
-import { duplicatePairs } from "./dedupe";
-import { emit, getFact, newFactId, rebuildFacts, FACT_TYPES, type Fact, type FactType } from "./facts";
-import { formatHit, handleHook, hookOutput, projectForCwd, RECALL_LOG, shortTurnId, type Harness, type HookEvent } from "./hooks";
-import { install, installedChecks } from "./install";
+import { getFact, rebuildFacts, FACT_TYPES, type FactType } from "./facts";
+import { formatHit, handleHook, hookOutput, projectForCwd, shortTurnId, type Harness, type HookEvent } from "./hooks";
+import { install } from "./install";
+import { addNote, applyFactAction, doctorChecks, duplicates, health, listFacts, listProjects, listSessions, mergeDuplicates, recallStats, reviewItems, sessionByPrefix, tailSession, type FactAction } from "./views";
 import { scanAll } from "./ingest";
-import { inList, projectBySlugOrId, scopeIds, type Project } from "./project";
+import { projectBySlugOrId, type Project } from "./project";
 import { queryTerms, search } from "./search";
 
 const argv = process.argv.slice(2);
@@ -61,11 +60,6 @@ function currentProject(required = true): Project | undefined {
     process.exit(1);
   }
   return p;
-}
-function sessionByPrefix(prefix: string): any {
-  const rows = openDb().query("SELECT * FROM sessions WHERE id LIKE ? ORDER BY last_ts DESC LIMIT 2").all(`${prefix}%`) as any[];
-  if (rows.length > 1 && rows[0].id !== prefix) console.error(`(ambiguous prefix ${prefix}; using most recent)`);
-  return rows[0];
 }
 
 const HELP = `ctx: shared memory across Claude Code and Codex sessions (Orca, Conductor, terminal)
@@ -233,9 +227,7 @@ async function main() {
 
     case "sessions": {
       const p = flag("all") ? undefined : currentProject(false);
-      const rows = openDb()
-        .query(`SELECT s.*, p.slug FROM sessions s LEFT JOIN projects p ON p.id = s.project WHERE s.skip = 0 AND s.turns > 0 ${p ? `AND s.project IN ${inList(scopeIds(p.id))}` : ""} ORDER BY s.last_ts DESC LIMIT ?`)
-        .all(...((p ? scopeIds(p.id) : []) as any[]), Number(opt("n", "n") ?? 15)) as any[];
+      const rows = listSessions(p?.id, Number(opt("n", "n") ?? 15));
       for (const s of rows) {
         console.log(`${s.id.slice(0, 8)}  ${ago(s.last_ts).padEnd(8)} ${(s.harness + "/" + s.source).padEnd(20)} ${String(s.turns).padStart(4)} turns  ${p ? "" : (s.slug ?? "-").padEnd(24)} ${oneLine(s.title ?? "", 60)}`);
       }
@@ -248,9 +240,8 @@ async function main() {
       if (!prefix) return console.error("usage: ctx tail <session-prefix>");
       const s = sessionByPrefix(prefix);
       if (!s) return console.error("no such session");
-      const rows = (openDb().query("SELECT * FROM turns WHERE session_id = ? ORDER BY idx DESC LIMIT ?").all(s.id, Number(opt("n", "n") ?? 6)) as any[]).reverse();
       console.log(`session ${s.id} · ${s.harness}/${s.source} · ${s.branch ?? ""} · last ${ago(s.last_ts)}`);
-      for (const t of rows) {
+      for (const t of tailSession(s.id, Number(opt("n", "n") ?? 6))) {
         console.log(`\n[${shortTurnId(t.id, t.idx)} · ${ago(t.ts_end)}${t.complete ? "" : " · in progress"}]`);
         console.log(`USER: ${oneLine(t.user, 600)}`);
         if (t.assistant) console.log(`AGENT: ${oneLine(t.assistant.slice(-1200), 800)}`);
@@ -260,21 +251,14 @@ async function main() {
 
     case "facts": {
       const p = currentProject()!;
-      const type = opt("type");
-      const rows = openDb()
-        .query(`SELECT * FROM facts WHERE project IN ${inList(scopeIds(p.id))} ${flag("inactive") ? "" : "AND status = 'active'"} ${type ? "AND type = ?" : ""} ORDER BY type, updated DESC`)
-        .all(...([...scopeIds(p.id), type].filter(Boolean) as string[])) as any[];
+      const rows = listFacts(p.id, { type: opt("type"), inactive: flag("inactive") });
       for (const f of rows) console.log(`[${f.id}] ${f.type.padEnd(10)} ${f.status === "active" ? "" : `(${f.status}) `}${withWhy(f.text, f.why)}  (${f.origin} · ${f.harness ?? ""})`);
       if (!rows.length) console.log("no facts");
       return;
     }
 
     case "projects": {
-      const rows = openDb()
-        .query(`SELECT p.slug, p.id, COUNT(DISTINCT s.id) sessions, MAX(s.last_ts) last, (SELECT COUNT(*) FROM facts f WHERE f.project = p.id AND f.status = 'active') facts
-                FROM projects p LEFT JOIN sessions s ON s.project = p.id AND s.skip = 0 GROUP BY p.id ORDER BY last DESC`)
-        .all() as any[];
-      for (const r of rows) if (r.sessions) console.log(`${r.slug.padEnd(36)} ${String(r.sessions).padStart(4)} sessions ${String(r.facts).padStart(4)} facts  ${r.last ? ago(r.last).padEnd(8) : ""}  ${r.id}`);
+      for (const r of listProjects()) console.log(`${r.slug.padEnd(36)} ${String(r.sessions).padStart(4)} sessions ${String(r.facts).padStart(4)} facts  ${r.last ? ago(r.last).padEnd(8) : ""}  ${r.id}`);
       return;
     }
 
@@ -287,8 +271,7 @@ async function main() {
       if (!FACT_TYPES.includes(type)) return console.error(`--type must be one of ${FACT_TYPES.join(", ")}`);
       const p = currentProject()!;
       const session = process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CODEX_SESSION_ID;
-      const [e] = emit([{ op: "add", fact: newFactId(), project: p.id, type, text, why: opt("why"), origin: "manual", confidence: 1, session, harness: process.env.ORCA_PANE_KEY ? "orca" : undefined }]);
-      writeLive(p);
+      const e = addNote(p.id, type, text, opt("why"), { session, harness: process.env.ORCA_PANE_KEY ? "orca" : undefined });
       console.log(`saved [${e.fact}] ${type}: ${text} → ${p.slug}`);
       return;
     }
@@ -298,62 +281,26 @@ async function main() {
     case "keep": {
       const ids = positional();
       if (!ids.length) return console.error(`usage: ctx ${cmd} <fact-id…>`);
-      const touched = new Set<string>();
-      for (const id of ids) {
-        const f = getFact(id);
-        if (!f) {
-          console.error(`no such fact: ${id}`);
-          continue;
-        }
-        // keep = the user re-confirmed it: refresh its age and lift it to full confidence.
-        emit([cmd === "keep" ? { op: "reaffirm", fact: f.id, project: f.project, confidence: 1 } : { op: cmd, fact: f.id, project: f.project, reason: opt("why") }]);
-        touched.add(f.project);
-        console.log(`${{ done: "marked done", retract: "retracted", keep: "kept" }[cmd]} [${f.id}] ${f.text}`);
-      }
-      for (const id of touched) {
-        const p = projectBySlugOrId(id);
-        if (p) writeLive(p);
-      }
+      const { ok, missing } = applyFactAction(ids, cmd as FactAction, opt("why"));
+      for (const id of missing) console.error(`no such fact: ${id}`);
+      for (const f of ok) console.log(`${{ done: "marked done", retract: "retracted", keep: "kept" }[cmd as FactAction]} [${f.id}] ${f.text}`);
       return;
     }
 
     case "dedupe": {
       const p = flag("all") ? undefined : currentProject();
-      const rows = openDb()
-        .query(`SELECT * FROM facts WHERE status = 'active' ${p ? `AND project IN ${inList(scopeIds(p.id))}` : ""}`)
-        .all(...(p ? scopeIds(p.id) : [])) as Fact[];
-      const pairs = duplicatePairs(rows);
+      const pairs = duplicates(p?.id);
       if (!pairs.length) return console.log("no duplicates");
       for (const { keep, drop } of pairs) console.log(`[${drop.id}] ${oneLine(drop.text, 150)}\n  → same as [${keep.id}] ${oneLine(keep.text, 150)}\n`);
       if (!flag("apply")) return console.log(`${pairs.length} duplicates. Run with --apply to merge them into the newer fact.`);
-      const events: Parameters<typeof emit>[0] = [];
-      for (const { keep, drop } of pairs) {
-        // supersede with an existing fact id: the insert is a no-op, the older copy points at the kept one.
-        events.push({ op: "supersede", fact: keep.id, target: drop.id, project: drop.project, reason: "duplicate" });
-        if (drop.confidence > keep.confidence) events.push({ op: "reaffirm", fact: keep.id, project: keep.project, confidence: drop.confidence });
-      }
-      emit(events);
-      for (const id of new Set(pairs.map((x) => x.keep.project))) {
-        const proj = projectBySlugOrId(id);
-        if (proj) writeLive(proj);
-      }
-      console.log(`merged ${pairs.length} duplicates`);
+      console.log(`merged ${mergeDuplicates(pairs)} duplicates`);
       return;
     }
 
     case "review": {
       const p = flag("all") ? undefined : currentProject();
       const days = Number(opt("days") ?? loadConfig().brief.staleDays);
-      const cutoff = Date.now() / 1000 - days * 86400;
-      const scope = p ? `AND f.project IN ${inList(scopeIds(p.id))}` : "";
-      const rows = openDb()
-        .query(
-          `SELECT f.*, p.slug FROM facts f LEFT JOIN projects p ON p.id = f.project
-           WHERE f.status = 'active' AND f.updated < ? ${scope}
-             AND (f.type IN ${inList(AGING)} OR (f.origin = 'agent' AND f.confidence < 0.8))
-           ORDER BY p.slug, f.type, f.updated`,
-        )
-        .all(cutoff, ...(p ? scopeIds(p.id) : []), ...AGING) as any[];
+      const rows = reviewItems(p?.id, days);
       if (!rows.length) return console.log(`nothing older than ${days} days to review${p ? ` in ${p.slug}` : ""}`);
       let last = "";
       for (const f of rows) {
@@ -366,55 +313,37 @@ async function main() {
     }
 
     case "status": {
-      const db = openDb();
       const cfg = loadConfig();
       const d = await callDaemon<{ pid: number; uptime: number; embedReady: boolean }>("/status", undefined, 1000);
       console.log(`ctxd: ${d ? `running (pid ${d.pid}, up ${Math.round(d.uptime / 60)}m, embeddings ${d.embedReady ? "ready" : "loading/off"})` : "NOT RUNNING"}`);
+      const h = health();
       // Ingest lag per source: newest transcript write vs what we've consumed.
-      for (const [source] of Object.entries(cfg.sources)) {
-        const lag = db.query("SELECT MAX(mtime) m, SUM(size - offset) behind FROM files WHERE source = ?").get(source) as any;
-        const newest = db.query("SELECT MAX(last_ts) t FROM sessions WHERE source = ?").get(source) as any;
-        console.log(`${source.padEnd(6)} files tracked: ${(db.query("SELECT COUNT(*) n FROM files WHERE source = ?").get(source) as any).n}, unread bytes: ${lag?.behind ?? 0}, newest turn: ${newest?.t ? ago(newest.t) : "-"}`);
-      }
-      const c = (q: string) => (db.query(q).get() as any).n;
-      console.log(`turns: ${c("SELECT COUNT(*) n FROM turns")} (embedded ${c("SELECT COUNT(*) n FROM turns WHERE embedded = 1")}), sessions: ${c("SELECT COUNT(*) n FROM sessions WHERE skip = 0")}, active facts: ${c("SELECT COUNT(*) n FROM facts WHERE status = 'active'")}`);
-      const u = usageToday("extract");
-      console.log(`extraction today: ${u.calls}/${cfg.extract.maxCallsPerDay} calls, ${u.failures} failures, ~$${u.cost.toFixed(3)} list-price; pending sessions: ${pendingSessions().length}`);
-      const bf = getMeta("backfill_since");
-      if (bf) {
-        const left = estimateBacklog(Number(bf));
-        console.log(`backfill since ${new Date(Number(bf) * 1000).toISOString().slice(0, 10)}: ~${left.calls} calls left (${left.sessions} sessions)${left.calls ? "" : "; done, run ctx backfill --off to clear"}`);
-      }
-      const last = getMeta("last_scan");
-      if (last) console.log(`last scan: ${ago(Number(last))}`);
-      if (existsSync(paths.db)) console.log(`index: ${(statSync(paths.db).size / 1e6).toFixed(1)} MB at ${paths.db}`);
+      for (const s of h.sources) console.log(`${s.source.padEnd(6)} files tracked: ${s.files}, unread bytes: ${s.unreadBytes}, newest turn: ${s.newest ? ago(s.newest) : "-"}`);
+      console.log(`turns: ${h.turns} (embedded ${h.embedded}), sessions: ${h.sessions}, active facts: ${h.facts}`);
+      console.log(`extraction today: ${h.extract.calls}/${cfg.extract.maxCallsPerDay} calls, ${h.extract.failures} failures, ~$${h.extract.cost.toFixed(3)} list-price; pending sessions: ${h.extract.pending}`);
+      if (h.backfill) console.log(`backfill since ${new Date(h.backfill.since * 1000).toISOString().slice(0, 10)}: ~${h.backfill.calls} calls left (${h.backfill.sessions} sessions)${h.backfill.calls ? "" : "; done, run ctx backfill --off to clear"}`);
+      if (h.lastScan) console.log(`last scan: ${ago(h.lastScan)}`);
+      if (h.indexBytes) console.log(`index: ${(h.indexBytes / 1e6).toFixed(1)} MB at ${paths.db}`);
       return;
     }
 
     case "recall-stats": {
-      const minSim = loadConfig().recall.minSim;
-      const lines = [RECALL_LOG() + ".1", RECALL_LOG()].filter(existsSync).flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean));
-      const rows = lines.map((l) => JSON.parse(l)).filter((r) => r.vec);
-      if (!rows.length) return console.log("no recall data yet (logged per prompt once embeddings are ready)");
-      const top = rows.map((r) => Math.max(0, ...r.hits.map((h: any) => h.sim ?? 0)));
-      const injected = rows.filter((r) => r.hits.some((h: any) => h.used)).length;
-      console.log(`${rows.length} prompts searched with vectors, ${injected} got notes (${((injected / rows.length) * 100).toFixed(0)}%); recall.minSim = ${minSim}`);
+      const r = recallStats();
+      if (!r.prompts) return console.log("no recall data yet (logged per prompt once embeddings are ready)");
+      console.log(`${r.prompts} prompts searched with vectors, ${r.injected} got notes (${((r.injected / r.prompts) * 100).toFixed(0)}%); recall.minSim = ${r.minSim}`);
       console.log("best match per prompt:");
-      for (let lo = 0.4; lo < 0.72; lo += 0.02) {
-        const n = top.filter((t) => t >= lo && t < lo + 0.02).length;
-        const mark = minSim >= lo && minSim < lo + 0.02 ? "  ← threshold" : "";
-        if (n || mark) console.log(`  ${lo.toFixed(2)}–${(lo + 0.02).toFixed(2)} ${"█".repeat(Math.ceil((n / rows.length) * 50))} ${n}${mark}`);
+      for (const b of r.buckets) {
+        if (b.n || b.threshold) console.log(`  ${b.lo.toFixed(2)}–${(b.lo + 0.02).toFixed(2)} ${"█".repeat(Math.ceil((b.n / r.prompts) * 50))} ${b.n}${b.threshold ? "  ← threshold" : ""}`);
       }
-      const near = rows.flatMap((r) => r.hits.filter((h: any) => h.sim !== undefined && h.sim < minSim && h.sim >= minSim - 0.03)).slice(-8);
-      if (near.length) {
+      if (r.near.length) {
         console.log(`\nnear misses (just under the threshold). If these look relevant, lower recall.minSim:`);
-        for (const h of near) console.log(`  ${h.sim.toFixed(3)}  ctx show ${h.id}`);
+        for (const h of r.near) console.log(`  ${h.sim.toFixed(3)}  ctx show ${h.id}`);
       }
       return;
     }
 
     case "doctor": {
-      const checks = installedChecks();
+      const checks = doctorChecks();
       // Give a just-restarted daemon a few seconds to come up before calling it down.
       let d = await callDaemon<any>("/status", undefined, 1000);
       for (let i = 0; !d && i < 8; i++) {
@@ -422,16 +351,6 @@ async function main() {
         d = await callDaemon<any>("/status", undefined, 1000);
       }
       checks.unshift({ ok: Boolean(d), name: "ctxd running", detail: d ? `pid ${d.pid}` : `not reachable at ${paths.socket}` });
-      const claudeOk = Bun.spawnSync(["claude", "--version"], { stdout: "pipe", stderr: "pipe" }).exitCode === 0;
-      checks.push({ ok: claudeOk, name: "claude CLI (extractor)", detail: claudeOk ? "found" : "not on PATH, extraction disabled" });
-      const logFile = `${paths.logs}/ctxd.log`;
-      if (existsSync(logFile)) {
-        // Only errors since the daemon last started count as current problems.
-        const lines = readFileSync(logFile, "utf8").split("\n").slice(-2000);
-        const start = lines.findLastIndex((l) => l.includes("ctxd starting"));
-        const errs = lines.slice(Math.max(0, start)).filter((l) => /failed|error/i.test(l));
-        checks.push({ ok: errs.length === 0, name: "daemon errors since start", detail: errs.length ? errs.slice(-3).join(" | ") : "none" });
-      }
       for (const c of checks) console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
       return;
     }
